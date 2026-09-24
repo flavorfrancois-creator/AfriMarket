@@ -29,6 +29,12 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; response = urlopen('http://127.0.0.1:8001/api/health', timeout=3); assert response.status == 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   frontend:
     build:
@@ -37,6 +43,12 @@ services:
       SERVICE_FQDN_FRONTEND_80: africashop.win
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   mongo-data:

@@ -2829,6 +2829,16 @@ async def root():
     return {"message": "AfriMarket API", "status": "ok"}
 
 
+@api.get("/health")
+async def health():
+    try:
+        await db.command("ping")
+    except Exception as exc:
+        logger.error("Health check failed: MongoDB is unavailable", exc_info=exc)
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return {"status": "ok"}
+
+
 @api.get("/download/export")
 async def download_export():
     from fastapi.responses import FileResponse
