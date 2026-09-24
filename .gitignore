@@ -1,0 +1,15 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+memory/test_credentials.md
+
+# Dependencies and generated assets
+frontend/node_modules/
+frontend/build/
+**/__pycache__/
+*.py[cod]
+
+# Database exports and runtime data
+database_dump/
+data/

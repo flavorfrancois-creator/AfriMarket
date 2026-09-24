@@ -1,0 +1,42 @@
+services:
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${SERVICE_USER_MONGO}
+      MONGO_INITDB_ROOT_PASSWORD: ${SERVICE_PASSWORD_64_MONGO}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok' --username \"$${MONGO_INITDB_ROOT_USERNAME}\" --password \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      MONGO_URL: mongodb://${SERVICE_USER_MONGO}:${SERVICE_PASSWORD_64_MONGO}@mongo:27017/?authSource=admin
+      DB_NAME: test_database
+      JWT_SECRET: ${SERVICE_REALBASE64_64_API}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@africashop.win}
+      ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_ADMIN}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://africashop.win,https://www.africashop.win}
+      FRONTEND_URL: ${FRONTEND_URL:-https://africashop.win}
+      EMERGENT_EMAIL_KEY: ${EMERGENT_EMAIL_KEY:-}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-AfriMarket}
+      EMERGENT_LLM_KEY: ${EMERGENT_LLM_KEY:-}
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      SERVICE_FQDN_FRONTEND_80: africashop.win
+    depends_on:
+      - api
+
+volumes:
+  mongo-data:
