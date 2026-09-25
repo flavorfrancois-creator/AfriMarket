@@ -20,7 +20,7 @@ services:
       DB_NAME: test_database
       JWT_SECRET: ${SERVICE_REALBASE64_64_API}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@africashop.win}
-      ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_ADMIN}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in Coolify before deployment}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://africashop.win,https://www.africashop.win}
       FRONTEND_URL: ${FRONTEND_URL:-https://africashop.win}
       EMERGENT_EMAIL_KEY: ${EMERGENT_EMAIL_KEY:-}
