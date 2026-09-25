@@ -821,21 +821,30 @@ export function AdminAudit() {
 
 
 // ---------------- Module 9: Gestionnaires (RBAC) ----------------
-const emptyStaff = { name: "", email: "", password: "", role: "MODERATOR", permissions: {}, shop_ids: [] };
+const emptyStaff = {
+  name: "", email: "", password: "", phone: "", phone_verification_id: "",
+  role: "MODERATOR", permissions: {}, country_scopes: [], shop_ids: [],
+};
 
 export function AdminStaff() {
   const [staff, setStaff] = useState(null);
   const [meta, setMeta] = useState(null);
   const [shops, setShops] = useState([]);
+  const [countries, setCountries] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyStaff);
+  const [otpCode, setOtpCode] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [phoneVerified, setPhoneVerified] = useState(false);
+  const [otpLoading, setOtpLoading] = useState(false);
 
   const load = () => api.get("/admin/staff").then((r) => setStaff(r.data.staff)).catch(() => setStaff([]));
   useEffect(() => {
     load();
     api.get("/admin/rbac/meta").then((r) => setMeta(r.data)).catch(() => {});
     api.get("/admin/shops").then((r) => setShops(r.data.shops)).catch(() => {});
+    api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
   }, []);
 
   const modules = meta?.modules || [];
@@ -844,13 +853,16 @@ export function AdminStaff() {
   const openCreate = () => {
     const defaults = {};
     (meta?.default_permissions?.MODERATOR || []).forEach((m) => { defaults[m] = true; });
-    setEditing(null); setForm({ ...emptyStaff, permissions: defaults }); setOpen(true);
+    setEditing(null); setForm({ ...emptyStaff, permissions: defaults });
+    setOtpCode(""); setOtpSent(false); setPhoneVerified(false); setOpen(true);
   };
   const openEdit = (s) => {
     const perms = {}; modules.forEach((m) => { perms[m.key] = (s.permissions || []).includes(m.key); });
     setEditing(s);
-    setForm({ name: s.name, email: s.email, password: "", role: s.role, permissions: perms, shop_ids: s.shop_ids || [],
+    setForm({ name: s.name, email: s.email, phone: s.phone || "", password: "", role: s.role, permissions: perms,
+      country_scopes: s.country_scopes || (s.country ? [s.country] : []), shop_ids: s.shop_ids || [],
       status: s.status, delegation: s.delegation || { enabled: false } });
+    setOtpCode(""); setOtpSent(false); setPhoneVerified(true);
     setOpen(true);
   };
   const setRoleDefaults = (role) => {
@@ -859,18 +871,60 @@ export function AdminStaff() {
   };
   const togglePerm = (k) => setForm((f) => ({ ...f, permissions: { ...f.permissions, [k]: !f.permissions[k] } }));
   const toggleShop = (id) => setForm((f) => ({ ...f, shop_ids: f.shop_ids.includes(id) ? f.shop_ids.filter((x) => x !== id) : [...f.shop_ids, id] }));
+  const toggleCountry = (country) => setForm((f) => {
+    const country_scopes = f.country_scopes.includes(country)
+      ? f.country_scopes.filter((item) => item !== country)
+      : [...f.country_scopes, country];
+    const shop_ids = f.shop_ids.filter((id) => {
+      const shop = shops.find((item) => item.id === id);
+      return shop && country_scopes.includes(shop.country);
+    });
+    return { ...f, country_scopes, shop_ids };
+  });
+  const eligibleShops = shops.filter((shop) => form.country_scopes.includes(shop.country));
+
+  const sendPhoneOtp = async () => {
+    if (!form.phone.trim()) { toast.error("Saisissez un numéro de téléphone international"); return; }
+    setOtpLoading(true);
+    try {
+      const { data } = await api.post("/admin/staff/phone-otp", { phone: form.phone });
+      setForm((f) => ({ ...f, phone_verification_id: data.verification_id }));
+      setOtpSent(true);
+      toast.info(data.demo_otp ? `Code OTP (simulation) : ${data.demo_otp}` : data.message);
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setOtpLoading(false); }
+  };
+
+  const verifyPhoneOtp = async () => {
+    if (!otpCode.trim()) { toast.error("Saisissez le code OTP"); return; }
+    setOtpLoading(true);
+    try {
+      await api.post("/admin/staff/phone-otp/verify", {
+        verification_id: form.phone_verification_id,
+        code: otpCode,
+      });
+      setPhoneVerified(true);
+      toast.success("Téléphone vérifié");
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setOtpLoading(false); }
+  };
 
   const save = async () => {
     try {
       if (editing) {
         await api.put(`/admin/staff/${editing.id}`, {
-          role: form.role, permissions: form.permissions, shop_ids: form.shop_ids,
+          role: form.role, permissions: form.permissions, country_scopes: form.country_scopes, shop_ids: form.shop_ids,
           status: form.status, delegation: form.delegation, password: form.password || undefined,
         });
         toast.success("Gestionnaire mis à jour");
       } else {
-        await api.post("/admin/staff", { name: form.name, email: form.email, password: form.password, role: form.role, permissions: form.permissions, shop_ids: form.shop_ids });
-        toast.success("Gestionnaire créé");
+        if (!phoneVerified) { toast.error("Vérifiez le téléphone avant de créer le compte"); return; }
+        await api.post("/admin/staff", {
+          name: form.name, email: form.email, password: form.password, phone: form.phone,
+          phone_verification_id: form.phone_verification_id, role: form.role,
+          country_scopes: form.country_scopes, permissions: form.permissions, shop_ids: form.shop_ids,
+        });
+        toast.success("Gestionnaire créé. Une vérification e-mail est en attente.");
       }
       setOpen(false); load();
     } catch (e) { toast.error(apiErr(e)); }
@@ -916,16 +970,50 @@ export function AdminStaff() {
           <DialogHeader><DialogTitle>{editing ? "Modifier le gestionnaire" : "Nouveau gestionnaire"}</DialogTitle></DialogHeader>
           <div className="space-y-4">
             {!editing && (
-              <div className="grid grid-cols-2 gap-3">
+              <>
                 <div><Label>Nom</Label><Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} data-testid="staff-name" className="mt-1" /></div>
-                <div><Label>E-mail</Label><Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} data-testid="staff-email" className="mt-1" /></div>
-              </div>
+                <div>
+                  <Label className="mb-2 block">Pays d'accès</Label>
+                  <p className="text-xs text-muted-foreground mb-2">Les permissions et boutiques seront limitées à ces pays.</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3 max-h-44 overflow-y-auto">
+                    {countries.map((country) => (
+                      <label key={country.name} className="flex items-center gap-2 text-sm cursor-pointer">
+                        <Checkbox checked={form.country_scopes.includes(country.name)} onCheckedChange={() => toggleCountry(country.name)} data-testid={`staff-country-${country.iso2}`} />
+                        {country.name}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="border border-border rounded-lg p-3 space-y-3">
+                  <Label>Numéro de téléphone à vérifier</Label>
+                  <div className="flex gap-2">
+                    <Input value={form.phone} disabled={phoneVerified} onChange={(e) => {
+                      setForm((f) => ({ ...f, phone: e.target.value, phone_verification_id: "" }));
+                      setOtpCode(""); setOtpSent(false);
+                    }} placeholder="+221..." data-testid="staff-phone" />
+                    <Button type="button" variant="outline" disabled={otpLoading || phoneVerified} onClick={sendPhoneOtp} data-testid="staff-send-phone-otp">Envoyer OTP</Button>
+                  </div>
+                  {otpSent && !phoneVerified && (
+                    <div className="flex gap-2">
+                      <Input value={otpCode} onChange={(e) => setOtpCode(e.target.value)} inputMode="numeric" maxLength={6} placeholder="Code OTP" data-testid="staff-phone-otp" />
+                      <Button type="button" disabled={otpLoading} onClick={verifyPhoneOtp} data-testid="staff-verify-phone-otp">Vérifier</Button>
+                    </div>
+                  )}
+                  {phoneVerified && <p className="text-xs text-green-700 flex items-center gap-1"><ShieldCheck className="w-4 h-4" /> Téléphone vérifié</p>}
+                </div>
+                {phoneVerified && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><Label>E-mail</Label><Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} data-testid="staff-email" className="mt-1" /></div>
+                    <div><Label>Mot de passe</Label><Input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} data-testid="staff-password" className="mt-1" /></div>
+                  </div>
+                )}
+              </>
             )}
             <div className="grid grid-cols-2 gap-3">
-              <div>
+              {editing && <div>
                 <Label>{editing ? "Nouveau mot de passe (optionnel)" : "Mot de passe"}</Label>
                 <Input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} data-testid="staff-password" className="mt-1" />
-              </div>
+              </div>}
               <div>
                 <Label>Rôle</Label>
                 <Select value={form.role} onValueChange={setRoleDefaults}>
@@ -949,6 +1037,19 @@ export function AdminStaff() {
                 </div>
               </div>
             )}
+            {editing && (
+              <div>
+                <Label className="mb-2 block">Pays d'accès</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3 max-h-44 overflow-y-auto">
+                  {countries.map((country) => (
+                    <label key={country.name} className="flex items-center gap-2 text-sm cursor-pointer">
+                      <Checkbox checked={form.country_scopes.includes(country.name)} onCheckedChange={() => toggleCountry(country.name)} data-testid={`staff-country-${country.iso2}`} />
+                      {country.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <div>
               <Label className="mb-2 block">Permissions par module (RBAC)</Label>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3">
@@ -961,13 +1062,13 @@ export function AdminStaff() {
               </div>
             </div>
             <div>
-              <Label className="mb-2 block">Rattachement aux boutiques (optionnel)</Label>
+              <Label className="mb-2 block">Rattachement aux boutiques des pays sélectionnés (optionnel)</Label>
               <div className="grid grid-cols-2 gap-2 border border-border rounded-lg p-3 max-h-40 overflow-y-auto">
-                {shops.length === 0 && <span className="text-xs text-muted-foreground">Aucune boutique</span>}
-                {shops.map((s) => (
+                {eligibleShops.length === 0 && <span className="text-xs text-muted-foreground">Aucune boutique dans les pays sélectionnés</span>}
+                {eligibleShops.map((s) => (
                   <label key={s.id} className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox checked={form.shop_ids.includes(s.id)} onCheckedChange={() => toggleShop(s.id)} data-testid={`shop-attach-${s.id}`} />
-                    {s.name}
+                    {s.name} <span className="text-xs text-muted-foreground">({s.country})</span>
                   </label>
                 ))}
               </div>
@@ -985,7 +1086,7 @@ export function AdminStaff() {
               )}
             </div>
           </div>
-          <DialogFooter><Button className="rounded-full" onClick={save} data-testid="save-staff">{editing ? "Enregistrer" : "Créer"}</Button></DialogFooter>
+          <DialogFooter><Button className="rounded-full" disabled={!editing && !phoneVerified} onClick={save} data-testid="save-staff">{editing ? "Enregistrer" : "Créer"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

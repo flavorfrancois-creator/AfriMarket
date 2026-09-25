@@ -72,17 +72,30 @@ class StaffCreateReq(BaseModel):
     email: EmailStr
     password: str
     role: str
+    phone: str
+    phone_verification_id: str
+    country_scopes: List[str] = []
     permissions: Optional[dict] = None
     shop_ids: List[str] = []
 
 
 class StaffUpdateReq(BaseModel):
     role: Optional[str] = None
+    country_scopes: Optional[List[str]] = None
     permissions: Optional[dict] = None
     shop_ids: Optional[List[str]] = None
     status: Optional[str] = None
     delegation: Optional[dict] = None
     password: Optional[str] = None
+
+
+class StaffPhoneOtpReq(BaseModel):
+    phone: str
+
+
+class StaffPhoneOtpVerifyReq(BaseModel):
+    verification_id: str
+    code: str
 
 
 class SettingsReq(BaseModel):
@@ -318,6 +331,7 @@ def _user_public(user: dict) -> dict:
         "phone": user.get("phone", ""),
         "role": user.get("role"),
         "country": user.get("country", ""),
+        "country_scopes": user.get("country_scopes", []),
         "currency": user.get("currency", ""),
         "phone_verified": user.get("phone_verified", False),
         "email_verified": user.get("email_verified", False),
@@ -372,6 +386,33 @@ async def _deliver_otp(user: dict, channel: str, code: str):
     else:
         # SMS / WhatsApp are modular MOCK channels (code shown in logs).
         logger.info("2FA %s OTP for %s: %s", channel.upper(), user.get("phone") or user["email"], code)
+
+
+def _normalize_phone(phone: str) -> str:
+    normalized = "".join(char for char in (phone or "").strip() if char.isdigit() or char == "+")
+    if not normalized.startswith("+") or not normalized[1:].isdigit() or not 8 <= len(normalized[1:]) <= 15:
+        raise HTTPException(status_code=400, detail="Numéro de téléphone international invalide")
+    return normalized
+
+
+async def _validate_staff_scope(country_scopes: List[str], shop_ids: List[str]) -> tuple:
+    allowed_countries = {country["name"] for country in COUNTRIES}
+    scopes = list(dict.fromkeys(country.strip() for country in country_scopes if country.strip()))
+    if not scopes:
+        raise HTTPException(status_code=400, detail="Sélectionnez au moins un pays")
+    invalid_countries = set(scopes) - allowed_countries
+    if invalid_countries:
+        raise HTTPException(status_code=400, detail="Pays non pris en charge")
+
+    ids = list(dict.fromkeys(shop_ids))
+    if not ids:
+        return scopes, ids
+    shops = await db.shops.find({"id": {"$in": ids}}).to_list(len(ids))
+    if len(shops) != len(ids):
+        raise HTTPException(status_code=400, detail="Une ou plusieurs boutiques sont introuvables")
+    if any(shop.get("country") not in scopes for shop in shops):
+        raise HTTPException(status_code=400, detail="Les boutiques doivent appartenir aux pays sélectionnés")
+    return scopes, ids
 
 
 # ---------------- Auth ----------------
@@ -2635,27 +2676,85 @@ async def list_staff(user: dict = Depends(require_module("admins"))):
     return {"staff": out}
 
 
+@api.post("/admin/staff/phone-otp")
+async def send_staff_phone_otp(req: StaffPhoneOtpReq, user: dict = Depends(require_super())):
+    phone = _normalize_phone(req.phone)
+    code = DEMO_OTP
+    verification_id = new_id()
+    await db.staff_phone_verifications.insert_one({
+        "id": verification_id,
+        "created_by": user["id"],
+        "phone": phone,
+        "code_hash": _hashlib.sha256(code.encode()).hexdigest(),
+        "attempts": 0,
+        "verified": False,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+        "created_at": now_iso(),
+    })
+    # SMS delivery is currently a configured demo channel, consistent with platform 2FA.
+    logger.info("STAFF phone OTP for %s: %s", phone, code)
+    return {"verification_id": verification_id, "message": "Code OTP envoyé (simulation)", "demo_otp": code}
+
+
+@api.post("/admin/staff/phone-otp/verify")
+async def verify_staff_phone_otp(req: StaffPhoneOtpVerifyReq, user: dict = Depends(require_super())):
+    challenge = await db.staff_phone_verifications.find_one({
+        "id": req.verification_id,
+        "created_by": user["id"],
+    })
+    if not challenge or challenge.get("verified"):
+        raise HTTPException(status_code=400, detail="Vérification du téléphone invalide")
+    if challenge["expires_at"] < now_iso():
+        raise HTTPException(status_code=400, detail="Code OTP expiré")
+    if challenge.get("attempts", 0) >= 5:
+        raise HTTPException(status_code=429, detail="Trop de tentatives OTP")
+    if _hashlib.sha256((req.code or "").strip().encode()).hexdigest() != challenge["code_hash"]:
+        await db.staff_phone_verifications.update_one({"_id": challenge["_id"]}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Code OTP invalide")
+    await db.staff_phone_verifications.update_one(
+        {"_id": challenge["_id"]},
+        {"$set": {"verified": True, "verified_at": now_iso()}},
+    )
+    return {"message": "Téléphone vérifié"}
+
+
 @api.post("/admin/staff")
-async def create_staff(req: StaffCreateReq, request: Request, user: dict = Depends(require_super())):
+async def create_staff(req: StaffCreateReq, request: Request, background_tasks: BackgroundTasks,
+                       user: dict = Depends(require_super())):
     role = req.role.upper()
     if role not in rbac.STAFF_ROLES or role == "SUPER_ADMIN":
         raise HTTPException(status_code=400, detail="Rôle invalide")
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Cet e-mail est déjà utilisé")
+    phone = _normalize_phone(req.phone)
+    phone_verification = await db.staff_phone_verifications.find_one({
+        "id": req.phone_verification_id,
+        "created_by": user["id"],
+        "phone": phone,
+        "verified": True,
+        "consumed": {"$ne": True},
+    })
+    if not phone_verification:
+        raise HTTPException(status_code=400, detail="Le numéro de téléphone doit être vérifié avant la création")
+    country_scopes, shop_ids = await _validate_staff_scope(req.country_scopes, req.shop_ids)
     perms = req.permissions if isinstance(req.permissions, dict) else \
         {m: (m in rbac.DEFAULT_ROLE_PERMISSIONS.get(role, [])) for m in rbac.MODULES}
+    email_code = str(random.randint(100000, 999999))
     doc = {
         "name": req.name.strip(), "email": email, "password_hash": hash_password(req.password),
-        "phone": "", "role": role, "country": "", "currency": "", "token_version": 0,
-        "phone_verified": True, "email_verified": True, "kyc_status": "NONE",
+        "phone": phone, "role": role, "country": country_scopes[0], "country_scopes": country_scopes,
+        "currency": currency_for_country(country_scopes[0])["code"], "token_version": 0,
+        "phone_verified": True, "email_verified": False, "email_code": email_code, "kyc_status": "NONE",
         "invite_code": gen_invite_code(), "is_partner": False,
-        "status": "ACTIVE", "permissions": perms, "shop_ids": req.shop_ids or [],
+        "status": "ACTIVE", "permissions": perms, "shop_ids": shop_ids,
         "delegation": {"enabled": False}, "two_factor_enabled": False, "two_factor_channel": "email",
         "created_at": now_iso(), "created_by": user["id"],
     }
     res = await db.users.insert_one(doc)
     doc["_id"] = res.inserted_id
+    await db.staff_phone_verifications.update_one({"_id": phone_verification["_id"]}, {"$set": {"consumed": True}})
+    background_tasks.add_task(send_verification_email, email, email_code)
     await audit_log(user, "CREATE_STAFF", "user", str(res.inserted_id), None, role, _client_ip(request))
     return {"staff": _user_public(doc)}
 
@@ -2676,8 +2775,15 @@ async def update_staff(sid: str, req: StaffUpdateReq, request: Request, user: di
         upd["role"] = r; bump = True
     if req.permissions is not None:
         upd["permissions"] = {m: bool(req.permissions.get(m)) for m in rbac.MODULES}; bump = True
-    if req.shop_ids is not None:
-        upd["shop_ids"] = req.shop_ids
+    if req.country_scopes is not None or req.shop_ids is not None:
+        country_scopes, shop_ids = await _validate_staff_scope(
+            req.country_scopes if req.country_scopes is not None else target.get("country_scopes") or [target.get("country", "")],
+            req.shop_ids if req.shop_ids is not None else target.get("shop_ids", []),
+        )
+        upd["country_scopes"] = country_scopes
+        upd["country"] = country_scopes[0]
+        upd["currency"] = currency_for_country(country_scopes[0])["code"]
+        upd["shop_ids"] = shop_ids
     if req.status is not None:
         if req.status not in ("ACTIVE", "SUSPENDED", "DISABLED"):
             raise HTTPException(status_code=400, detail="Statut invalide")
@@ -2880,6 +2986,8 @@ async def startup():
     await db.orders.create_index("customer_id")
     await db.wallet_transactions.create_index("user_id")
     await db.otp_challenges.create_index("id")
+    await db.staff_phone_verifications.create_index("id", unique=True)
+    await db.staff_phone_verifications.create_index("expires_at", expireAfterSeconds=0)
     await db.login_journal.create_index("created_at")
     await db.approval_requests.create_index("status")
     await db.product_reports.create_index("product_id")
