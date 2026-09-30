@@ -56,6 +56,27 @@ async def seed(db):
     c2 = await _ensure_user(db, "client2@demo.com", "Ibrahim Traoré", "Demo@2026", "CLIENT", "Sénégal",
                             extra={"is_partner": True})
 
+    test_password = "Test@2026"
+    for number in range(1, 6):
+        await _ensure_user(
+            db, f"customer{number}@afrimarket.demo", f"Customer {number}", test_password, "CLIENT", "Sénégal"
+        )
+        await _ensure_user(
+            db, f"merchant{number}@afrimarket.demo", f"Merchant {number}", test_password, "MERCHANT", "Sénégal"
+        )
+        await _ensure_user(
+            db, f"administrator{number}@afrimarket.demo", f"Administrator {number}", test_password, "ADMIN",
+            "Sénégal",
+            extra={
+                "country_scopes": ["Sénégal"],
+                "permissions": {"overview": True, "shops": True, "products": True, "orders": True, "users": True,
+                                "finance": True, "moderation": True, "settings": True, "reporting": True,
+                                "audit": True, "admins": False},
+                "shop_ids": [],
+                "status": "ACTIVE",
+            },
+        )
+
     if await db.shops.find_one({"is_demo": True}):
         return  # demo data already present
 
