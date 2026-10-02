@@ -308,10 +308,21 @@ class PrivateClientReq(BaseModel):
     address: Optional[str] = ""
 
 
-class PaymentProviderReq(BaseModel):
-    provider: str = "MONITY_WORLD"
-    api_key: Optional[str] = ""
+class CountryPaymentApiReq(BaseModel):
+    country: str
+    name: str
+    provider: str
+    api_key: str
     account: Optional[str] = ""
+    active: bool = True
+
+
+class CountryPaymentApiUpdateReq(BaseModel):
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    account: Optional[str] = None
+    active: Optional[bool] = None
 
 
 class ConfirmReceiptReq(BaseModel):
@@ -619,6 +630,92 @@ async def get_currencies():
     return {"currencies": CURRENCIES}
 
 
+def _payment_api_public(payment_api: dict) -> dict:
+    return {
+        "id": payment_api["id"],
+        "country": payment_api["country"],
+        "name": payment_api["name"],
+        "provider": payment_api["provider"],
+        "account": payment_api.get("account", ""),
+        "active": payment_api.get("active", True),
+        "api_key_configured": bool(payment_api.get("api_key")),
+        "created_at": payment_api.get("created_at"),
+    }
+
+
+@api.get("/admin/payment-apis")
+async def list_country_payment_apis(country: Optional[str] = None,
+                                    user: dict = Depends(require_module("settings"))):
+    query = {"country": country} if country else {}
+    payment_apis = await db.country_payment_apis.find(query).sort([("country", 1), ("created_at", 1)]).to_list(500)
+    return {"payment_apis": [_payment_api_public(payment_api) for payment_api in payment_apis]}
+
+
+@api.post("/admin/payment-apis")
+async def create_country_payment_api(req: CountryPaymentApiReq, request: Request,
+                                     user: dict = Depends(require_module("settings"))):
+    country = req.country.strip()
+    if country not in {item["name"] for item in COUNTRIES}:
+        raise HTTPException(status_code=400, detail="Pays non pris en charge")
+    name, provider, api_key = req.name.strip(), req.provider.strip(), req.api_key.strip()
+    if not name or not provider or not api_key:
+        raise HTTPException(status_code=400, detail="Nom, fournisseur et clé API sont requis")
+    count = await db.country_payment_apis.count_documents({"country": country})
+    if count >= 10:
+        raise HTTPException(status_code=400, detail="Maximum de 10 API de paiement par pays atteint")
+    payment_api = {
+        "id": new_id(), "country": country, "name": name, "provider": provider,
+        "api_key": api_key, "account": req.account.strip(), "active": bool(req.active),
+        "created_at": now_iso(), "created_by": user["id"],
+    }
+    await db.country_payment_apis.insert_one(payment_api)
+    await audit_log(user, "CREATE_COUNTRY_PAYMENT_API", "payment_api", payment_api["id"], None, country,
+                    _client_ip(request))
+    return {"payment_api": _payment_api_public(payment_api)}
+
+
+@api.put("/admin/payment-apis/{payment_api_id}")
+async def update_country_payment_api(payment_api_id: str, req: CountryPaymentApiUpdateReq, request: Request,
+                                     user: dict = Depends(require_module("settings"))):
+    payment_api = await db.country_payment_apis.find_one({"id": payment_api_id})
+    if not payment_api:
+        raise HTTPException(status_code=404, detail="API de paiement introuvable")
+    updates = {}
+    for field in ("name", "provider"):
+        value = getattr(req, field)
+        if value is not None:
+            value = value.strip()
+            if not value:
+                raise HTTPException(status_code=400, detail=f"{field} ne peut pas être vide")
+            updates[field] = value
+    if req.account is not None:
+        updates["account"] = req.account.strip()
+    if req.api_key is not None:
+        if not req.api_key.strip():
+            raise HTTPException(status_code=400, detail="La clé API ne peut pas être vide")
+        updates["api_key"] = req.api_key.strip()
+    if req.active is not None:
+        updates["active"] = req.active
+    if not updates:
+        return {"payment_api": _payment_api_public(payment_api)}
+    await db.country_payment_apis.update_one({"_id": payment_api["_id"]}, {"$set": updates})
+    await audit_log(user, "UPDATE_COUNTRY_PAYMENT_API", "payment_api", payment_api_id, None, payment_api["country"],
+                    _client_ip(request))
+    fresh = await db.country_payment_apis.find_one({"_id": payment_api["_id"]})
+    return {"payment_api": _payment_api_public(fresh)}
+
+
+@api.delete("/admin/payment-apis/{payment_api_id}")
+async def delete_country_payment_api(payment_api_id: str, request: Request,
+                                     user: dict = Depends(require_module("settings"))):
+    payment_api = await db.country_payment_apis.find_one_and_delete({"id": payment_api_id})
+    if not payment_api:
+        raise HTTPException(status_code=404, detail="API de paiement introuvable")
+    await audit_log(user, "DELETE_COUNTRY_PAYMENT_API", "payment_api", payment_api_id, payment_api["country"], None,
+                    _client_ip(request))
+    return {"message": "API de paiement supprimée"}
+
+
 # ---------------- Legal content (Module 7) ----------------
 LEGAL_KINDS = ["terms", "privacy", "faq", "contact", "mentions"]
 LEGAL_DEFAULTS = {
@@ -827,8 +924,6 @@ async def create_shop(req: ShopReq, user: dict = Depends(require_roles("MERCHANT
         "status": "DRAFT",
         "rejection_reason": "",
         "coefficients": {"partner": 0.5, "professional": 0.5, "enterprise": 0.5},
-        "payment_provider": "MONITY_WORLD",
-        "payment_config": {},
         "created_at": now_iso(),
         "is_demo": False,
     }
@@ -887,7 +982,7 @@ async def update_coefficients(shop_id: str, req: CoefficientsReq, user: dict = D
 
 def _public_shop(shop: dict) -> dict:
     s = serialize(shop)
-    for k in ("coefficients", "rejection_reason", "tax_number", "payment_config",
+    for k in ("coefficients", "rejection_reason", "tax_number",
               "commission_rate", "product_quota", "storage_quota_mb", "suspension_reason"):
         s.pop(k, None)
     return s
@@ -1493,7 +1588,11 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
             wallet_applied = round(min(wallet_budget, grand_total), 2)
             wallet_budget = round(wallet_budget - wallet_applied, 2)
         provider_amount = round(grand_total - wallet_applied, 2)
-        provider = shop.get("payment_provider") or "MONITY_WORLD"
+        payment_api = await db.country_payment_apis.find_one(
+            {"country": shop["country"], "active": True},
+            sort=[("created_at", 1)],
+        )
+        provider = payment_api["provider"] if payment_api else "MONITY_WORLD"
         payment = await process_payment(provider, provider_amount, shop["currency"])
         order = {
             "id": new_id(), "ref": gen_order_ref(), "tracking_number": gen_tracking(),
@@ -1502,7 +1601,8 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
             "items": order_items, "subtotal": round(total, 2), "shipping": round(shipping, 2),
             "total": grand_total, "currency": shop["currency"], "currency_symbol": shop.get("currency_symbol", ""),
             "status": "NOUVELLE", "payment_method": req.payment_method, "payment_provider": provider,
-            "payment_status": payment["status"], "wallet_paid": wallet_applied, "provider_paid": provider_amount,
+            "payment_status": payment["status"], "payment_api_id": payment_api["id"] if payment_api else None,
+            "wallet_paid": wallet_applied, "provider_paid": provider_amount,
             "address": req.address, "bonus_total": round(total_bonus, 2), "margin_total": round(total_margin, 2),
             "commission": commission, "commission_rate": effective_comm_rate,
             "is_private": is_private, "private_client": private_info,
@@ -2480,20 +2580,6 @@ async def confirm_receipt(order_id: str, req: ConfirmReceiptReq, user: dict = De
     return {"message": "Réception confirmée"}
 
 
-# ---------------- Shop payment provider ----------------
-@api.put("/shops/{shop_id}/payment")
-async def update_payment_provider(shop_id: str, req: PaymentProviderReq, user: dict = Depends(require_roles("MERCHANT"))):
-    shop = await _shop_or_404(shop_id)
-    if shop["owner_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Accès refusé")
-    await db.shops.update_one({"id": shop_id}, {"$set": {
-        "payment_provider": req.provider or "MONITY_WORLD",
-        "payment_config": {"api_key": req.api_key or "", "account": req.account or ""},
-    }})
-    await audit_log(user, "UPDATE_PAYMENT_PROVIDER", "shop", shop_id, shop.get("payment_provider"), req.provider)
-    return {"message": "Fournisseur de paiement mis à jour"}
-
-
 @api.post("/orders/confirm-by-tracking")
 async def confirm_by_tracking(req: ConfirmByTrackingReq, user: dict = Depends(get_current_user)):
     code = (req.code or "").strip()
@@ -2988,6 +3074,9 @@ async def startup():
     await db.otp_challenges.create_index("id")
     await db.staff_phone_verifications.create_index("id", unique=True)
     await db.staff_phone_verifications.create_index("expires_at", expireAfterSeconds=0)
+    await db.country_payment_apis.create_index("id", unique=True)
+    await db.country_payment_apis.create_index("country")
+    await db.country_payment_apis.create_index([("country", 1), ("active", 1), ("created_at", 1)])
     await db.login_journal.create_index("created_at")
     await db.approval_requests.create_index("status")
     await db.product_reports.create_index("product_id")

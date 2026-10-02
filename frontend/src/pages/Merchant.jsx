@@ -838,9 +838,7 @@ export function MerchantOpportunities() {
 export function MerchantSettings() {
   const { shop, reload } = useMerchant();
   const [coef, setCoef] = useState(shop.coefficients || { partner: 0.5, professional: 0.5, enterprise: 0.5 });
-  const [prov, setProv] = useState({ provider: shop.payment_provider || "MONITY_WORLD", account: shop.payment_config?.account || "", api_key: shop.payment_config?.api_key || "" });
   const save = async () => { try { await api.put(`/shops/${shop.id}/coefficients`, { partner: Number(coef.partner), professional: Number(coef.professional), enterprise: Number(coef.enterprise) }); toast.success("Coefficients enregistrés"); reload(); } catch (e) { toast.error(apiErr(e)); } };
-  const savePayment = async () => { try { await api.put(`/shops/${shop.id}/payment`, prov); toast.success("Paiement enregistré"); reload(); } catch (e) { toast.error(apiErr(e)); } };
   return (
     <div>
       <PageHeader title="Paramètres" subtitle="Boutique & coefficients de recette" />
@@ -858,27 +856,6 @@ export function MerchantSettings() {
             <div key={k} className="mb-3"><Label>{l}</Label><Input type="number" step="0.1" min="0" max="1" value={coef[k]} onChange={(e) => setCoef({ ...coef, [k]: e.target.value })} className="mt-1" data-testid={`coef-${k}`} /></div>
           ))}
           <Button className="rounded-full mt-2" onClick={save} data-testid="save-coefficients">Enregistrer</Button>
-        </div>
-        <div className="bg-card border border-border rounded-xl p-5 lg:col-span-2">
-          <h3 className="font-display font-bold mb-1">Système de paiement</h3>
-          <p className="text-xs text-muted-foreground mb-4">Chaque boutique peut intégrer son API de paiement. Priorité au système par défaut <strong>Monity World</strong>.</p>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <Label>Fournisseur</Label>
-              <Select value={prov.provider} onValueChange={(v) => setProv({ ...prov, provider: v })}>
-                <SelectTrigger className="mt-1" data-testid="payment-provider"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="MONITY_WORLD">Monity World (par défaut)</SelectItem>
-                  <SelectItem value="MOBILE_MONEY">Mobile Money</SelectItem>
-                  <SelectItem value="STRIPE">Carte bancaire</SelectItem>
-                  <SelectItem value="BANK_TRANSFER">Virement bancaire</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div><Label>Compte / N°</Label><Input value={prov.account} onChange={(e) => setProv({ ...prov, account: e.target.value })} className="mt-1" placeholder="Ex: +221..." /></div>
-            <div><Label>Clé API</Label><Input value={prov.api_key} onChange={(e) => setProv({ ...prov, api_key: e.target.value })} className="mt-1" placeholder="(optionnel)" /></div>
-          </div>
-          <Button className="rounded-full mt-3" onClick={savePayment} data-testid="save-payment">Enregistrer le paiement</Button>
         </div>
       </div>
     </div>

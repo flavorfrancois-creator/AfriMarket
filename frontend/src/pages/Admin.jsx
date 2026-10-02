@@ -28,7 +28,7 @@ import {
 import {
   Home, Store, Users, ShoppingCart, Banknote, Globe, FileText, TrendingUp, Package,
   CheckCircle2, XCircle, ShieldCheck, ShieldAlert, UserCog, ScrollText, Trash2, KeyRound, Truck, Clock,
-  BarChart3, Download, Calendar as CalendarIcon, Trophy,
+  BarChart3, Download, Calendar as CalendarIcon, Trophy, Plus,
 } from "lucide-react";
 
 const ROLE_LABELS = {
@@ -631,10 +631,54 @@ export function AdminWithdrawals() {
 export function AdminCountries() {
   const [countries, setCountries] = useState([]);
   const [currencies, setCurrencies] = useState([]);
+  const [paymentApis, setPaymentApis] = useState([]);
+  const [paymentForm, setPaymentForm] = useState({ country: "", name: "", provider: "", api_key: "", account: "" });
   useEffect(() => {
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
     api.get("/config/currencies").then((r) => setCurrencies(r.data.currencies)).catch(() => {});
+    api.get("/admin/payment-apis").then((r) => setPaymentApis(r.data.payment_apis)).catch(() => {});
   }, []);
+  const selectedPaymentApiCount = paymentApis.filter((item) => item.country === paymentForm.country).length;
+  const reloadPaymentApis = () => api.get("/admin/payment-apis").then((r) => setPaymentApis(r.data.payment_apis));
+  const addPaymentApi = async () => {
+    if (!paymentForm.country || !paymentForm.name.trim() || !paymentForm.provider.trim() || !paymentForm.api_key.trim()) {
+      toast.error("Pays, nom, fournisseur et clé API sont requis");
+      return;
+    }
+    try {
+      await api.post("/admin/payment-apis", paymentForm);
+      toast.success("API de paiement ajoutée");
+      setPaymentForm({ country: paymentForm.country, name: "", provider: "", api_key: "", account: "" });
+      await reloadPaymentApis();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const patchPaymentApi = async (item, patch) => {
+    try { await api.put(`/admin/payment-apis/${item.id}`, patch); await reloadPaymentApis(); toast.success("API de paiement mise à jour"); }
+    catch (e) { toast.error(apiErr(e)); }
+  };
+  const editPaymentApi = async (item) => {
+    const name = window.prompt("Nom de l'API :", item.name);
+    if (name === null) return;
+    const provider = window.prompt("Code fournisseur :", item.provider);
+    if (provider === null) return;
+    const account = window.prompt("Compte / identifiant (laisser vide si non utilisé) :", item.account || "");
+    if (account === null) return;
+    await patchPaymentApi(item, { name, provider, account });
+  };
+  const rotatePaymentApiKey = async (item) => {
+    const apiKey = window.prompt(`Nouvelle clé API pour ${item.name} :`, "");
+    if (apiKey === null) return;
+    if (!apiKey.trim()) {
+      toast.error("La clé API est requise");
+      return;
+    }
+    await patchPaymentApi(item, { api_key: apiKey });
+  };
+  const deletePaymentApi = async (item) => {
+    if (!window.confirm(`Supprimer l'API ${item.name} ?`)) return;
+    try { await api.delete(`/admin/payment-apis/${item.id}`); toast.success("API de paiement supprimée"); await reloadPaymentApis(); }
+    catch (e) { toast.error(apiErr(e)); }
+  };
   return (
     <div>
       <PageHeader title="Pays & Devises" subtitle={`${countries.length} pays · ${currencies.length} devises`} />
@@ -656,6 +700,52 @@ export function AdminCountries() {
               <TableBody>{countries.map((c) => (<TableRow key={c.name}><TableCell className="text-sm">{c.name}</TableCell><TableCell className="font-mono text-sm">{c.currency}</TableCell></TableRow>))}</TableBody>
             </Table>
           </div>
+        </div>
+      </div>
+      <div className="bg-card border border-border rounded-xl p-5 mt-6">
+        <h3 className="font-display font-bold">API de paiement par pays</h3>
+        <p className="text-xs text-muted-foreground mt-1 mb-4">Seuls les administrateurs gèrent les API de transaction. Maximum 10 API par pays; les clés ne sont jamais réaffichées.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+          <div>
+            <Label>Pays</Label>
+            <Select value={paymentForm.country} onValueChange={(country) => setPaymentForm({ ...paymentForm, country })}>
+              <SelectTrigger className="mt-1" data-testid="payment-api-country"><SelectValue placeholder="Choisir" /></SelectTrigger>
+              <SelectContent>{countries.map((country) => <SelectItem key={country.name} value={country.name}>{country.name}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          <div><Label>Nom</Label><Input value={paymentForm.name} onChange={(e) => setPaymentForm({ ...paymentForm, name: e.target.value })} placeholder="MTN Cameroun" className="mt-1" data-testid="payment-api-name" /></div>
+          <div><Label>Fournisseur</Label><Input value={paymentForm.provider} onChange={(e) => setPaymentForm({ ...paymentForm, provider: e.target.value })} placeholder="MTN_MOMO" className="mt-1" data-testid="payment-api-provider" /></div>
+          <div><Label>Compte / identifiant</Label><Input value={paymentForm.account} onChange={(e) => setPaymentForm({ ...paymentForm, account: e.target.value })} placeholder="Optionnel" className="mt-1" data-testid="payment-api-account" /></div>
+          <div><Label>Clé API</Label><Input type="password" value={paymentForm.api_key} onChange={(e) => setPaymentForm({ ...paymentForm, api_key: e.target.value })} className="mt-1" data-testid="payment-api-key" /></div>
+        </div>
+        <div className="flex items-center justify-between mt-3">
+          <span className="text-xs text-muted-foreground">{paymentForm.country ? `${selectedPaymentApiCount}/10 API configurée(s) pour ${paymentForm.country}` : "Sélectionnez un pays"}</span>
+          <Button className="rounded-full" onClick={addPaymentApi} disabled={!paymentForm.country || selectedPaymentApiCount >= 10} data-testid="add-payment-api"><Plus className="w-4 h-4 mr-1" /> Ajouter l'API</Button>
+        </div>
+        <div className="border border-border rounded-lg overflow-hidden mt-5 overflow-x-auto">
+          <Table>
+            <TableHeader><TableRow><TableHead>Pays</TableHead><TableHead>Nom</TableHead><TableHead>Fournisseur</TableHead><TableHead>Compte</TableHead><TableHead>Clé</TableHead><TableHead>Active</TableHead><TableHead>Actions</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {paymentApis.length === 0 && <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">Aucune API de paiement configurée</TableCell></TableRow>}
+              {paymentApis.map((item) => (
+                <TableRow key={item.id}>
+                  <TableCell className="text-sm">{item.country}</TableCell>
+                  <TableCell className="font-medium text-sm">{item.name}</TableCell>
+                  <TableCell className="font-mono text-xs">{item.provider}</TableCell>
+                  <TableCell className="text-xs">{item.account || "—"}</TableCell>
+                  <TableCell className="text-xs">{item.api_key_configured ? "Configurée" : "—"}</TableCell>
+                  <TableCell><Switch checked={item.active} onCheckedChange={(active) => patchPaymentApi(item, { active })} data-testid={`payment-api-active-${item.id}`} /></TableCell>
+                  <TableCell>
+                    <div className="flex items-center justify-end gap-1">
+                      <Button size="sm" variant="ghost" onClick={() => editPaymentApi(item)} data-testid={`payment-api-edit-${item.id}`}>Modifier</Button>
+                      <Button size="sm" variant="ghost" onClick={() => rotatePaymentApiKey(item)} data-testid={`payment-api-rotate-${item.id}`}><KeyRound className="w-4 h-4" /></Button>
+                      <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deletePaymentApi(item)} data-testid={`payment-api-delete-${item.id}`}><Trash2 className="w-4 h-4" /></Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
       </div>
     </div>
