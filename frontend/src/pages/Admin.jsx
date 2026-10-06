@@ -655,13 +655,23 @@ export function AdminCountries() {
   const [currencies, setCurrencies] = useState([]);
   const [paymentApis, setPaymentApis] = useState([]);
   const [paymentForm, setPaymentForm] = useState({ country: "", name: "", provider: "", api_key: "", account: "" });
+  const [adminCountries, setAdminCountries] = useState([]);
   useEffect(() => {
+    api.get("/admin/countries").then((r) => setAdminCountries(r.data.countries)).catch(() => {});
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
     api.get("/config/currencies").then((r) => setCurrencies(r.data.currencies)).catch(() => {});
     api.get("/admin/payment-apis").then((r) => setPaymentApis(r.data.payment_apis)).catch(() => {});
   }, []);
+  const reloadCountries = () => api.get("/admin/countries").then((r) => setAdminCountries(r.data.countries));
   const selectedPaymentApiCount = paymentApis.filter((item) => item.country === paymentForm.country).length;
   const reloadPaymentApis = () => api.get("/admin/payment-apis").then((r) => setPaymentApis(r.data.payment_apis));
+  const toggleCountryActivation = async (countryName, currentActive) => {
+    try {
+      await api.put(`/admin/countries/${countryName}/toggle`, { active: !currentActive });
+      toast.success(`Pays ${!currentActive ? 'activé' : 'désactivé'}`);
+      await reloadCountries();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
   const addPaymentApi = async () => {
     if (!paymentForm.country || !paymentForm.name.trim() || !paymentForm.provider.trim() || !paymentForm.api_key.trim()) {
       toast.error("Pays, nom, fournisseur et clé API sont requis");
@@ -703,7 +713,17 @@ export function AdminCountries() {
   };
   return (
     <div>
-      <PageHeader title="Pays & Devises" subtitle={`${countries.length} pays · ${currencies.length} devises`} />
+      <PageHeader title="Pays & Devises" subtitle={`${adminCountries.length} pays · ${currencies.length} devises`} />
+      <div className="bg-card border border-border rounded-xl overflow-hidden mb-6">
+        <div className="px-4 py-3 font-display font-bold border-b border-border">Gestion des Pays</div>
+        <p className="text-xs text-muted-foreground px-4 py-3">Désactiver un pays masquera toutes ses boutiques en ligne et les marquera comme brouillon. Les clients ne pourront pas accéder aux produits de ce pays.</p>
+        <div className="max-h-[400px] overflow-y-auto">
+          <Table>
+            <TableHeader><TableRow><TableHead>Pays</TableHead><TableHead>ISO</TableHead><TableHead>Devise</TableHead><TableHead>Statut</TableHead><TableHead>Action</TableHead></TableRow></TableHeader>
+            <TableBody>{adminCountries.map((c) => (<TableRow key={c.name}><TableCell className="text-sm font-medium">{c.name}</TableCell><TableCell className="font-mono text-sm">{c.iso2}</TableCell><TableCell className="font-mono text-sm">{c.currency}</TableCell><TableCell>{c.active ? <Badge className="bg-green-600">Actif</Badge> : <Badge variant="secondary">Inactif</Badge>}</TableCell><TableCell><Switch checked={c.active} onCheckedChange={() => toggleCountryActivation(c.name, c.active)} data-testid={`toggle-country-${c.name}`} /></TableCell></TableRow>))}</TableBody>
+            </Table>
+        </div>
+      </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="px-4 py-3 font-display font-bold border-b border-border">Devises</div>
@@ -715,7 +735,7 @@ export function AdminCountries() {
           </div>
         </div>
         <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <div className="px-4 py-3 font-display font-bold border-b border-border">Pays</div>
+          <div className="px-4 py-3 font-display font-bold border-b border-border">Pays (Actifs uniquement)</div>
           <div className="max-h-[500px] overflow-y-auto">
             <Table>
               <TableHeader><TableRow><TableHead>Pays</TableHead><TableHead>Devise</TableHead></TableRow></TableHeader>

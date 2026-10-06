@@ -329,6 +329,10 @@ class ShopPersonalApiToggleReq(BaseModel):
     allow_personal_api: bool
 
 
+class CountryToggleReq(BaseModel):
+    active: bool
+
+
 class CategoryReq(BaseModel):
     name: str
     description: Optional[str] = ""
@@ -637,7 +641,9 @@ async def reset_password(req: ResetReq):
 # ---------------- Config ----------------
 @api.get("/config/countries")
 async def get_countries():
-    return {"countries": COUNTRIES}
+    countries = await db.countries.find({"active": True}).sort("name", 1).to_list(200)
+    result = [{"name": c["name"], "iso2": c["iso2"], "currency": c["currency"]} for c in countries]
+    return {"countries": result}
 
 
 @api.get("/config/currencies")
@@ -729,6 +735,31 @@ async def delete_country_payment_api(payment_api_id: str, request: Request,
     await audit_log(user, "DELETE_COUNTRY_PAYMENT_API", "payment_api", payment_api_id, payment_api["country"], None,
                     _client_ip(request))
     return {"message": "API de paiement supprimée"}
+
+
+# ---------------- Countries Management ----------------
+@api.get("/admin/countries")
+async def list_all_countries(user: dict = Depends(require_module("settings"))):
+    countries = await db.countries.find({}).sort("name", 1).to_list(200)
+    result = [{"name": c["name"], "iso2": c["iso2"], "currency": c["currency"], "active": c.get("active", True),
+               "created_at": c.get("created_at")} for c in countries]
+    return {"countries": result}
+
+
+@api.put("/admin/countries/{country_name}/toggle")
+async def toggle_country_activation(country_name: str, req: CountryToggleReq, request: Request,
+                                    user: dict = Depends(require_module("settings"))):
+    country_name = country_name.strip()
+    country = await db.countries.find_one({"name": country_name})
+    if not country:
+        raise HTTPException(status_code=404, detail="Pays introuvable")
+    old_active = country.get("active", True)
+    await db.countries.update_one({"name": country_name}, {"$set": {"active": req.active, "updated_at": now_iso()}})
+    if not req.active:
+        await db.shops.update_many({"country": country_name, "status": {"$ne": "REJECTED"}},
+                                   {"$set": {"status": "DRAFT", "updated_at": now_iso()}})
+    await audit_log(user, "TOGGLE_COUNTRY", "country", country_name, old_active, req.active, _client_ip(request))
+    return {"message": f"Pays {country_name} {'activé' if req.active else 'désactivé'}", "active": req.active}
 
 
 # ---------------- Categories & Subcategories ----------------
@@ -1103,10 +1134,14 @@ def _public_shop(shop: dict) -> dict:
 
 @api.get("/shops")
 async def list_shops(q: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None):
-    query = {"status": "APPROVED", "suspended": {"$ne": True}}
+    active_countries = await db.countries.find({"active": True}).to_list(200)
+    active_country_names = {c["name"] for c in active_countries}
+    query = {"status": "APPROVED", "suspended": {"$ne": True}, "country": {"$in": list(active_country_names)}}
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
     if country:
+        if country not in active_country_names:
+            return {"shops": []}
         query["country"] = country
     if city:
         query["city"] = {"$regex": city, "$options": "i"}
@@ -3221,6 +3256,7 @@ async def startup():
     await db.categories.create_index("id", unique=True)
     await db.subcategories.create_index("id", unique=True)
     await db.subcategories.create_index("category_id")
+    await db.countries.create_index("name", unique=True)
     await db.login_journal.create_index("created_at")
     await db.approval_requests.create_index("status")
     await db.product_reports.create_index("product_id")
@@ -3242,6 +3278,10 @@ async def startup():
         for d in defaults:
             await db.carriers.insert_one({"id": new_id(), "tracking_url": "", "active": True,
                                           "suspended": False, "created_at": now_iso(), **d})
+    if await db.countries.count_documents({}) == 0:
+        for country in COUNTRIES:
+            await db.countries.insert_one({"name": country["name"], "iso2": country["iso2"],
+                                           "currency": country["currency"], "active": True, "created_at": now_iso()})
     await seed_module.seed(db)
     await db.products.update_many({"moderation_status": {"$exists": False}},
                                   {"$set": {"moderation_status": "APPROVED", "moderation_reason": "", "flagged": False}})
