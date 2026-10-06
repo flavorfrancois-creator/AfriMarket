@@ -348,6 +348,13 @@ class ConfirmReceiptReq(BaseModel):
     code: str
 
 
+class UserLocationReq(BaseModel):
+    country: str
+    city: Optional[str] = ""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
 # ---------------- Helpers ----------------
 def _client_ip(request: Request) -> str:
     return request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0]
@@ -1132,8 +1139,53 @@ def _public_shop(shop: dict) -> dict:
     return s
 
 
+def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance in km between two lat/lon coordinates."""
+    if not (lat1 and lon1 and lat2 and lon2):
+        return float('inf')
+    from math import radians, cos, sin, asin, sqrt
+    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    return c * 6371
+
+
+@api.post("/location/set")
+async def set_user_location(req: UserLocationReq, user: dict = Depends(get_current_user)):
+    await db.users.update_one({"_id": ObjectId(user["id"])},
+                              {"$set": {"location": req.model_dump(), "updated_at": now_iso()}})
+    return {"message": "Localisation mise à jour"}
+
+
+@api.get("/location/detect")
+async def detect_location(request: Request):
+    """Detect user location from IP and return country/city suggestion."""
+    ip = _client_ip(request)
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["curl", "-s", f"https://ipapi.co/{ip}/json/"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            import json
+            data = json.loads(result.stdout)
+            country = data.get("country_name", "")
+            city = data.get("city", "")
+            lat = data.get("latitude")
+            lon = data.get("longitude")
+            return {"country": country, "city": city, "latitude": lat, "longitude": lon}
+    except Exception:
+        pass
+    return {"country": "", "city": "", "latitude": None, "longitude": None}
+
+
 @api.get("/shops")
-async def list_shops(q: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None):
+async def list_shops(q: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None,
+                     user: Optional[dict] = Depends(lambda: None)):
+    """List shops, optionally sorted by proximity to user location."""
     active_countries = await db.countries.find({"active": True}).to_list(200)
     active_country_names = {c["name"] for c in active_countries}
     query = {"status": "APPROVED", "suspended": {"$ne": True}, "country": {"$in": list(active_country_names)}}
@@ -1146,7 +1198,18 @@ async def list_shops(q: Optional[str] = None, country: Optional[str] = None, cit
     if city:
         query["city"] = {"$regex": city, "$options": "i"}
     shops = await db.shops.find(query).to_list(200)
-    return {"shops": [_public_shop(s) for s in shops]}
+    result = [_public_shop(s) for s in shops]
+    if user and user.get("location"):
+        user_loc = user["location"]
+        user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
+        if user_lat and user_lon:
+            for shop in result:
+                shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
+                shop["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
+            result.sort(key=lambda x: (x.get("country") != user_loc.get("country"),
+                                       x.get("city") != user_loc.get("city"),
+                                       x.get("distance_km", float('inf'))))
+    return {"shops": result}
 
 
 @api.get("/shops/{shop_id}")
@@ -1408,7 +1471,22 @@ async def list_products(request: Request, q: Optional[str] = None, category: Opt
             continue
         if max_price is not None and item["display_price"] > max_price:
             continue
+        if user and user.get("location"):
+            shop = shop_cache.get(p["shop_id"]) or await db.shops.find_one({"id": p["shop_id"]})
+            if shop:
+                shop_cache[p["shop_id"]] = shop
+                shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
+                user_loc = user["location"]
+                user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
+                if user_lat and user_lon and shop_lat and shop_lon:
+                    item["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
+                    item["same_country"] = shop.get("country") == user_loc.get("country")
+                    item["same_city"] = shop.get("city") == user_loc.get("city")
         result.append(item)
+    if user and user.get("location"):
+        result.sort(key=lambda x: (not x.get("same_country", False),
+                                    not x.get("same_city", False),
+                                    x.get("distance_km", float('inf'))))
     return {"products": result}
 
 

@@ -3,11 +3,12 @@ import { Link } from "react-router-dom";
 import { money } from "@/lib/currency";
 import { useCart } from "@/context/CartContext";
 import { Button } from "@/components/ui/button";
-import { ShoppingCart, Store } from "lucide-react";
+import { ShoppingCart, Store, MapPin } from "lucide-react";
 
 export function ProductCard({ product, index = 0 }) {
   const { add } = useCart();
   const promo = product.is_promo;
+  const hasDistance = product.distance_km !== undefined && product.distance_km !== null && isFinite(product.distance_km);
   return (
     <div
       className="group bg-card border border-border rounded-xl overflow-hidden card-lift stagger-in flex flex-col"
@@ -24,6 +25,11 @@ export function ProductCard({ product, index = 0 }) {
         {promo && (
           <span className="absolute top-2 left-2 bg-primary text-primary-foreground text-xs font-semibold px-2 py-1 rounded-full">
             PROMO
+          </span>
+        )}
+        {hasDistance && (
+          <span className="absolute top-2 right-2 bg-blue-600 text-white text-xs font-semibold px-2 py-1 rounded-full flex items-center gap-1">
+            <MapPin className="w-3 h-3" /> {product.distance_km.toFixed(1)}km
           </span>
         )}
       </Link>

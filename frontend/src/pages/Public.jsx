@@ -19,6 +19,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 export function Products() {
   const { t } = useI18n();
   const { active } = usePrivateClient();
+  const { userLocation } = useAuth();
   const [sp] = useSearchParams();
   const [products, setProducts] = useState(null);
   const q = sp.get("q") || "";
@@ -40,6 +41,14 @@ export function Products() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-10">
       <PageHeader title={title} subtitle={products ? `${products.length} article(s)` : ""} />
+      {userLocation && (userLocation.country || userLocation.city) && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2 text-sm">
+          <MapPin className="w-4 h-4 text-blue-600" />
+          <span className="text-blue-900">
+            {userLocation.city && userLocation.country ? `Recherche autour de ${userLocation.city}, ${userLocation.country}` : userLocation.country ? `Recherche dans ${userLocation.country}` : ""}
+          </span>
+        </div>
+      )}
       {products === null ? (
         <Loading />
       ) : products.length === 0 ? (
@@ -55,6 +64,7 @@ export function Products() {
 
 export function Shops() {
   const { t } = useI18n();
+  const { userLocation } = useAuth();
   const [shops, setShops] = useState(null);
   const [q, setQ] = useState("");
   useEffect(() => {
@@ -64,11 +74,24 @@ export function Shops() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-10">
       <PageHeader title={t("shops")} />
+      {userLocation && (userLocation.country || userLocation.city) && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2 text-sm">
+          <MapPin className="w-4 h-4 text-green-600" />
+          <span className="text-green-900">
+            {userLocation.city && userLocation.country ? `Recherche autour de ${userLocation.city}, ${userLocation.country}` : userLocation.country ? `Recherche dans ${userLocation.country}` : ""}
+          </span>
+        </div>
+      )}
       <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Rechercher une boutique ou une ville..." className="max-w-md mb-6 rounded-full" data-testid="shop-search" />
       {shops === null ? <Loading /> : filtered.length === 0 ? <EmptyState title="Aucune boutique" /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((s) => (
-            <Link key={s.id} to={`/shops/${s.id}`} className="bg-card border border-border rounded-xl overflow-hidden card-lift" data-testid={`shop-${s.id}`}>
+            <Link key={s.id} to={`/shops/${s.id}`} className="bg-card border border-border rounded-xl overflow-hidden card-lift relative" data-testid={`shop-${s.id}`}>
+              {s.distance_km !== undefined && s.distance_km !== null && isFinite(s.distance_km) && (
+                <span className="absolute top-2 right-2 bg-green-600 text-white text-xs font-semibold px-2 py-1 rounded-full flex items-center gap-1 z-10">
+                  <MapPin className="w-3 h-3" /> {s.distance_km.toFixed(1)}km
+                </span>
+              )}
               <div className="p-5 flex items-center gap-4">
                 <img src={s.logo} alt="" className="w-16 h-16 rounded-xl object-cover" />
                 <div className="min-w-0">
