@@ -23,7 +23,7 @@ import {
 import {
   AdminLayout, AdminOverview, AdminShops, AdminUsers, AdminWithdrawals, AdminOrders,
   AdminAudit, AdminCountries, AdminStaff, AdminSecurity, AdminApprovals, AdminLoginJournal,
-  AdminProducts, AdminReports, AdminPayouts, AdminCarriers, AdminReporting, AdminGlobalSettings, AdminEarnings,
+  AdminProducts, AdminReports, AdminPayouts, AdminCarriers, AdminReporting, AdminGlobalSettings, AdminEarnings, AdminCategories,
 } from "@/pages/Admin";
 
 function App() {
@@ -109,6 +109,7 @@ function App() {
                   <Route path="security" element={<AdminSecurity />} />
                   <Route path="journal" element={<AdminLoginJournal />} />
                   <Route path="countries" element={<AdminCountries />} />
+                  <Route path="categories" element={<AdminCategories />} />
                   <Route path="settings-global" element={<AdminGlobalSettings />} />
                   <Route path="carriers" element={<AdminCarriers />} />
                   <Route path="audit" element={<AdminAudit />} />

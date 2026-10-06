@@ -329,6 +329,17 @@ class ShopPersonalApiToggleReq(BaseModel):
     allow_personal_api: bool
 
 
+class CategoryReq(BaseModel):
+    name: str
+    description: Optional[str] = ""
+
+
+class SubcategoryReq(BaseModel):
+    category_id: str
+    name: str
+    description: Optional[str] = ""
+
+
 class ConfirmReceiptReq(BaseModel):
     code: str
 
@@ -718,6 +729,104 @@ async def delete_country_payment_api(payment_api_id: str, request: Request,
     await audit_log(user, "DELETE_COUNTRY_PAYMENT_API", "payment_api", payment_api_id, payment_api["country"], None,
                     _client_ip(request))
     return {"message": "API de paiement supprimée"}
+
+
+# ---------------- Categories & Subcategories ----------------
+@api.get("/admin/categories")
+async def list_categories(user: dict = Depends(require_module("settings"))):
+    categories = await db.categories.find({}).sort("created_at", 1).to_list(500)
+    out = []
+    for cat in categories:
+        subcats = await db.subcategories.find({"category_id": cat["id"]}).sort("created_at", 1).to_list(100)
+        out.append({
+            "id": cat["id"], "name": cat["name"], "description": cat.get("description", ""),
+            "created_at": cat["created_at"], "subcategories": [serialize(s) for s in subcats]
+        })
+    return {"categories": out}
+
+
+@api.post("/admin/categories")
+async def create_category(req: CategoryReq, request: Request, user: dict = Depends(require_module("settings"))):
+    if not (req.name or "").strip():
+        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
+    cat = {
+        "id": new_id(), "name": req.name.strip(), "description": (req.description or "").strip(),
+        "created_at": now_iso(), "updated_at": now_iso()
+    }
+    await db.categories.insert_one(cat)
+    await audit_log(user, "CREATE_CATEGORY", "category", cat["id"], None, cat["name"], _client_ip(request))
+    return {"message": "Catégorie créée", "category": serialize(cat)}
+
+
+@api.put("/admin/categories/{category_id}")
+async def update_category(category_id: str, req: CategoryReq, request: Request,
+                         user: dict = Depends(require_module("settings"))):
+    if not (req.name or "").strip():
+        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
+    cat = await db.categories.find_one({"id": category_id})
+    if not cat:
+        raise HTTPException(status_code=404, detail="Catégorie introuvable")
+    upd = {"name": req.name.strip(), "description": (req.description or "").strip(), "updated_at": now_iso()}
+    await db.categories.update_one({"id": category_id}, {"$set": upd})
+    await audit_log(user, "UPDATE_CATEGORY", "category", category_id, cat["name"], upd["name"], _client_ip(request))
+    return {"message": "Catégorie mise à jour", "category": {**cat, **upd}}
+
+
+@api.delete("/admin/categories/{category_id}")
+async def delete_category(category_id: str, request: Request, user: dict = Depends(require_module("settings"))):
+    cat = await db.categories.find_one({"id": category_id})
+    if not cat:
+        raise HTTPException(status_code=404, detail="Catégorie introuvable")
+    subcat_count = await db.subcategories.count_documents({"category_id": category_id})
+    if subcat_count > 0:
+        raise HTTPException(status_code=400, detail=f"Impossible de supprimer : {subcat_count} sous-catégorie(s) trouvée(s). Supprimez-les d'abord.")
+    await db.categories.delete_one({"id": category_id})
+    await audit_log(user, "DELETE_CATEGORY", "category", category_id, cat["name"], None, _client_ip(request))
+    return {"message": "Catégorie supprimée"}
+
+
+@api.post("/admin/subcategories")
+async def create_subcategory(req: SubcategoryReq, request: Request, user: dict = Depends(require_module("settings"))):
+    if not (req.name or "").strip():
+        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
+    cat = await db.categories.find_one({"id": req.category_id})
+    if not cat:
+        raise HTTPException(status_code=404, detail="Catégorie introuvable")
+    subcat = {
+        "id": new_id(), "category_id": req.category_id, "name": req.name.strip(),
+        "description": (req.description or "").strip(), "created_at": now_iso(), "updated_at": now_iso()
+    }
+    await db.subcategories.insert_one(subcat)
+    await audit_log(user, "CREATE_SUBCATEGORY", "subcategory", subcat["id"], None, subcat["name"], _client_ip(request))
+    return {"message": "Sous-catégorie créée", "subcategory": serialize(subcat)}
+
+
+@api.put("/admin/subcategories/{subcategory_id}")
+async def update_subcategory(subcategory_id: str, req: SubcategoryReq, request: Request,
+                            user: dict = Depends(require_module("settings"))):
+    if not (req.name or "").strip():
+        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
+    subcat = await db.subcategories.find_one({"id": subcategory_id})
+    if not subcat:
+        raise HTTPException(status_code=404, detail="Sous-catégorie introuvable")
+    cat = await db.categories.find_one({"id": req.category_id})
+    if not cat:
+        raise HTTPException(status_code=404, detail="Catégorie introuvable")
+    upd = {"category_id": req.category_id, "name": req.name.strip(),
+           "description": (req.description or "").strip(), "updated_at": now_iso()}
+    await db.subcategories.update_one({"id": subcategory_id}, {"$set": upd})
+    await audit_log(user, "UPDATE_SUBCATEGORY", "subcategory", subcategory_id, subcat["name"], upd["name"], _client_ip(request))
+    return {"message": "Sous-catégorie mise à jour", "subcategory": {**subcat, **upd}}
+
+
+@api.delete("/admin/subcategories/{subcategory_id}")
+async def delete_subcategory(subcategory_id: str, request: Request, user: dict = Depends(require_module("settings"))):
+    subcat = await db.subcategories.find_one({"id": subcategory_id})
+    if not subcat:
+        raise HTTPException(status_code=404, detail="Sous-catégorie introuvable")
+    await db.subcategories.delete_one({"id": subcategory_id})
+    await audit_log(user, "DELETE_SUBCATEGORY", "subcategory", subcategory_id, subcat["name"], None, _client_ip(request))
+    return {"message": "Sous-catégorie supprimée"}
 
 
 # ---------------- Legal content (Module 7) ----------------
@@ -3109,6 +3218,9 @@ async def startup():
     await db.country_payment_apis.create_index("id", unique=True)
     await db.country_payment_apis.create_index("country")
     await db.country_payment_apis.create_index([("country", 1), ("active", 1), ("created_at", 1)])
+    await db.categories.create_index("id", unique=True)
+    await db.subcategories.create_index("id", unique=True)
+    await db.subcategories.create_index("category_id")
     await db.login_journal.create_index("created_at")
     await db.approval_requests.create_index("status")
     await db.product_reports.create_index("product_id")

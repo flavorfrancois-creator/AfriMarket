@@ -28,7 +28,7 @@ import {
 import {
   Home, Store, Users, ShoppingCart, Banknote, Globe, FileText, TrendingUp, Package,
   CheckCircle2, XCircle, ShieldCheck, ShieldAlert, UserCog, ScrollText, Trash2, KeyRound, Truck, Clock,
-  BarChart3, Download, Calendar as CalendarIcon, Trophy, Plus,
+  BarChart3, Download, Calendar as CalendarIcon, Trophy, Plus, Tag,
 } from "lucide-react";
 
 const ROLE_LABELS = {
@@ -61,6 +61,7 @@ export function AdminLayout() {
     { to: "/admin/security", label: "Sécurité & 2FA", icon: KeyRound, testid: "security", show: can("settings") },
     { to: "/admin/journal", label: "Journal connexions", icon: ScrollText, testid: "journal", show: can("audit") },
     { to: "/admin/countries", label: t("countries_currencies"), icon: Globe, testid: "countries", show: can("settings") },
+    { to: "/admin/categories", label: "Catégories", icon: Tag, testid: "categories", show: can("settings") },
     { to: "/admin/settings-global", label: "Paramétrage global", icon: FileText, testid: "settings-global", show: can("settings") },
     { to: "/admin/carriers", label: "Transporteurs", icon: Truck, testid: "carriers", show: can("settings") },
     { to: "/admin/audit", label: t("audit_log"), icon: FileText, testid: "audit", show: can("audit") },
@@ -1712,6 +1713,187 @@ export function AdminCarriers() {
           <DialogFooter><Button className="rounded-full" onClick={create} data-testid="save-carrier">Ajouter</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+export function AdminCategories() {
+  const [categories, setCategories] = useState(null);
+  const [categoryForm, setCategoryForm] = useState({ name: "", description: "" });
+  const [subcategoryForm, setSubcategoryForm] = useState({ category_id: "", name: "", description: "" });
+  const [selectedCat, setSelectedCat] = useState(null);
+  const [editingCat, setEditingCat] = useState(null);
+  const [editingSub, setEditingSub] = useState(null);
+
+  const load = () => api.get("/admin/categories").then((r) => setCategories(r.data.categories)).catch(() => setCategories([]));
+  useEffect(() => { load(); }, []);
+
+  const createCategory = async () => {
+    if (!categoryForm.name.trim()) { toast.error("Le nom est obligatoire"); return; }
+    try {
+      await api.post("/admin/categories", categoryForm);
+      toast.success("Catégorie créée");
+      setCategoryForm({ name: "", description: "" });
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const updateCategory = async (id) => {
+    if (!editingCat.name.trim()) { toast.error("Le nom est obligatoire"); return; }
+    try {
+      await api.put(`/admin/categories/${id}`, editingCat);
+      toast.success("Catégorie mise à jour");
+      setEditingCat(null);
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const deleteCategory = async (id) => {
+    if (!window.confirm("Supprimer cette catégorie ?")) return;
+    try {
+      await api.delete(`/admin/categories/${id}`);
+      toast.success("Catégorie supprimée");
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const createSubcategory = async () => {
+    if (!subcategoryForm.name.trim()) { toast.error("Le nom est obligatoire"); return; }
+    if (!subcategoryForm.category_id) { toast.error("Sélectionnez une catégorie"); return; }
+    try {
+      await api.post("/admin/subcategories", subcategoryForm);
+      toast.success("Sous-catégorie créée");
+      setSubcategoryForm({ category_id: "", name: "", description: "" });
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const updateSubcategory = async (id) => {
+    if (!editingSub.name.trim()) { toast.error("Le nom est obligatoire"); return; }
+    try {
+      await api.put(`/admin/subcategories/${id}`, editingSub);
+      toast.success("Sous-catégorie mise à jour");
+      setEditingSub(null);
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const deleteSubcategory = async (id) => {
+    if (!window.confirm("Supprimer cette sous-catégorie ?")) return;
+    try {
+      await api.delete(`/admin/subcategories/${id}`);
+      toast.success("Sous-catégorie supprimée");
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  if (categories === null) return <Loading />;
+
+  return (
+    <div>
+      <PageHeader title="Catégories" subtitle="Gestion des catégories et sous-catégories" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-1">
+          <div className="bg-card border border-border rounded-xl p-4">
+            <h3 className="font-semibold mb-4">Ajouter une catégorie</h3>
+            <div className="space-y-3">
+              <div>
+                <Label className="text-xs">Nom</Label>
+                <Input value={categoryForm.name} onChange={(e) => setCategoryForm((p) => ({ ...p, name: e.target.value }))} 
+                       placeholder="Ex: Électronique" className="mt-1" />
+              </div>
+              <div>
+                <Label className="text-xs">Description (optionnel)</Label>
+                <Textarea value={categoryForm.description} onChange={(e) => setCategoryForm((p) => ({ ...p, description: e.target.value }))} 
+                         placeholder="Description..." rows={2} className="mt-1 text-xs" />
+              </div>
+              <Button className="w-full rounded-full" onClick={createCategory}><Plus className="w-4 h-4 mr-2" /> Créer</Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-2">
+          <div className="space-y-4">
+            {categories.length === 0 ? (
+              <EmptyState title="Aucune catégorie" />
+            ) : (
+              categories.map((cat) => (
+                <div key={cat.id} className="bg-card border border-border rounded-xl p-4">
+                  {editingCat?.id === cat.id ? (
+                    <div className="space-y-3">
+                      <Input value={editingCat.name} onChange={(e) => setEditingCat((p) => ({ ...p, name: e.target.value }))} />
+                      <Textarea value={editingCat.description} onChange={(e) => setEditingCat((p) => ({ ...p, description: e.target.value }))} rows={2} />
+                      <div className="flex gap-2">
+                        <Button size="sm" className="rounded-full" onClick={() => updateCategory(cat.id)}>Enregistrer</Button>
+                        <Button size="sm" variant="outline" className="rounded-full" onClick={() => setEditingCat(null)}>Annuler</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <h4 className="font-semibold">{cat.name}</h4>
+                        {cat.description && <p className="text-sm text-muted-foreground mt-1">{cat.description}</p>}
+                        <p className="text-xs text-muted-foreground mt-2">{cat.subcategories.length} sous-catégorie(s)</p>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button size="sm" variant="outline" className="rounded-full h-8" onClick={() => setEditingCat(cat)}>Éditer</Button>
+                        <Button size="sm" variant="outline" className="rounded-full h-8 text-destructive" onClick={() => deleteCategory(cat.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {cat.subcategories && cat.subcategories.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-border">
+                      <p className="text-xs font-semibold text-muted-foreground mb-2">Sous-catégories</p>
+                      <div className="space-y-2">
+                        {cat.subcategories.map((sub) => (
+                          <div key={sub.id} className="flex items-center justify-between bg-accent/30 rounded-lg p-2 text-sm">
+                            {editingSub?.id === sub.id ? (
+                              <div className="flex-1 flex gap-1">
+                                <Input value={editingSub.name} onChange={(e) => setEditingSub((p) => ({ ...p, name: e.target.value }))} 
+                                       size="sm" className="h-7 text-xs" />
+                                <Button size="sm" className="h-7 rounded-full" onClick={() => updateSubcategory(sub.id)}>OK</Button>
+                                <Button size="sm" variant="outline" className="h-7 rounded-full" onClick={() => setEditingSub(null)}>✕</Button>
+                              </div>
+                            ) : (
+                              <>
+                                <span>{sub.name}</span>
+                                <div className="flex gap-1">
+                                  <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => setEditingSub(sub)}>Éditer</Button>
+                                  <Button size="sm" variant="ghost" className="h-6 px-2 text-destructive" onClick={() => deleteSubcategory(sub.id)}><Trash2 className="w-3 h-3" /></Button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-8 bg-card border border-border rounded-xl p-4">
+        <h3 className="font-semibold mb-4">Ajouter une sous-catégorie</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+          <Select value={subcategoryForm.category_id} onValueChange={(v) => setSubcategoryForm((p) => ({ ...p, category_id: v }))}>
+            <SelectTrigger className="rounded-full"><SelectValue placeholder="Sélectionnez une catégorie" /></SelectTrigger>
+            <SelectContent>
+              {categories.map((cat) => (
+                <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Input value={subcategoryForm.name} onChange={(e) => setSubcategoryForm((p) => ({ ...p, name: e.target.value }))} 
+                 placeholder="Nom de la sous-catégorie" className="rounded-full" />
+          <Input value={subcategoryForm.description} onChange={(e) => setSubcategoryForm((p) => ({ ...p, description: e.target.value }))} 
+                 placeholder="Description (optionnel)" className="rounded-full" />
+          <Button className="rounded-full" onClick={createSubcategory}><Plus className="w-4 h-4 mr-2" /> Créer</Button>
+        </div>
+      </div>
     </div>
   );
 }
