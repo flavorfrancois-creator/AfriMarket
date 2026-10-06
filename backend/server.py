@@ -325,6 +325,10 @@ class CountryPaymentApiUpdateReq(BaseModel):
     active: Optional[bool] = None
 
 
+class ShopPersonalApiToggleReq(BaseModel):
+    allow_personal_api: bool
+
+
 class ConfirmReceiptReq(BaseModel):
     code: str
 
@@ -1588,11 +1592,28 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
             wallet_applied = round(min(wallet_budget, grand_total), 2)
             wallet_budget = round(wallet_budget - wallet_applied, 2)
         provider_amount = round(grand_total - wallet_applied, 2)
-        payment_api = await db.country_payment_apis.find_one(
-            {"country": shop["country"], "active": True},
-            sort=[("created_at", 1)],
-        )
-        provider = payment_api["provider"] if payment_api else "MONITY_WORLD"
+        
+        # Priority: 1. Personal merchant API (if enabled), 2. Country-level API, 3. Fallback
+        payment_api = None
+        payment_api_id = None
+        provider = "MONITY_WORLD"
+        
+        # Check if personal merchant API is enabled for this shop
+        if shop.get("allow_personal_api"):
+            # In future: shops can have personal_payment_provider, personal_payment_api_key stored
+            # For now, personal API support requires merchant configuration endpoint
+            pass
+        
+        # If no personal API, use country-level API
+        if not payment_api:
+            payment_api = await db.country_payment_apis.find_one(
+                {"country": shop["country"], "active": True},
+                sort=[("created_at", 1)],
+            )
+            if payment_api:
+                payment_api_id = payment_api["id"]
+                provider = payment_api["provider"]
+        
         payment = await process_payment(provider, provider_amount, shop["currency"])
         order = {
             "id": new_id(), "ref": gen_order_ref(), "tracking_number": gen_tracking(),
@@ -1601,7 +1622,7 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
             "items": order_items, "subtotal": round(total, 2), "shipping": round(shipping, 2),
             "total": grand_total, "currency": shop["currency"], "currency_symbol": shop.get("currency_symbol", ""),
             "status": "NOUVELLE", "payment_method": req.payment_method, "payment_provider": provider,
-            "payment_status": payment["status"], "payment_api_id": payment_api["id"] if payment_api else None,
+            "payment_status": payment["status"], "payment_api_id": payment_api_id,
             "wallet_paid": wallet_applied, "provider_paid": provider_amount,
             "address": req.address, "bonus_total": round(total_bonus, 2), "margin_total": round(total_margin, 2),
             "commission": commission, "commission_rate": effective_comm_rate,
@@ -2304,6 +2325,17 @@ async def set_shop_quota(shop_id: str, req: ShopQuotaReq, request: Request, user
     await db.shops.update_one({"id": shop_id}, {"$set": upd})
     await audit_log(user, "SET_SHOP_QUOTA", "shop", shop_id, shop.get("product_quota"), upd["product_quota"], _client_ip(request))
     return {"message": "Quota mis à jour", **upd}
+
+
+@api.put("/admin/shops/{shop_id}/personal-api")
+async def toggle_shop_personal_api(shop_id: str, req: ShopPersonalApiToggleReq, request: Request, user: dict = Depends(require_module("shops"))):
+    shop = await _shop_or_404(shop_id)
+    upd = {"allow_personal_api": req.allow_personal_api}
+    await db.shops.update_one({"id": shop_id}, {"$set": upd})
+    await audit_log(user, "TOGGLE_PERSONAL_API", "shop", shop_id, shop.get("allow_personal_api"), req.allow_personal_api, _client_ip(request))
+    await notify(shop["owner_id"], "SHOP_SETTINGS_CHANGED", "Paramètres boutique modifiés",
+                 f"L'administrateur a {'autorisé' if req.allow_personal_api else 'désautorisé'} l'utilisation d'APIs personnalisées pour votre boutique.")
+    return {"message": "API personnalisée " + ("autorisée" if req.allow_personal_api else "désautorisée"), "allow_personal_api": req.allow_personal_api}
 
 
 @api.get("/admin/shops/{shop_id}")

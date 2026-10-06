@@ -319,6 +319,7 @@ export function AdminShops() {
   const [quota, setQuota] = useState("");
   const [storage, setStorage] = useState("");
   const [suspendReason, setSuspendReason] = useState("");
+  const [allowPersonalApi, setAllowPersonalApi] = useState(false);
 
   const load = () => api.get("/admin/shops").then((r) => setShops(r.data.shops)).catch(() => setShops([]));
   useEffect(() => { load(); }, []);
@@ -329,6 +330,7 @@ export function AdminShops() {
     setComm(data.shop.commission_rate == null ? "" : String(data.shop.commission_rate * 100));
     setQuota(data.shop.product_quota == null ? "" : String(data.shop.product_quota));
     setStorage(data.shop.storage_quota_mb == null ? "" : String(data.shop.storage_quota_mb));
+    setAllowPersonalApi(data.shop.allow_personal_api || false);
     setSuspendReason("");
   };
   const approve = async (id) => { await api.put(`/admin/shops/${id}/approve`); toast.success("Boutique approuvée"); setDetail(null); load(); };
@@ -339,6 +341,15 @@ export function AdminShops() {
   };
   const saveQuota = async (id) => {
     try { await api.put(`/admin/shops/${id}/quota`, { product_quota: parseInt(quota || "0", 10), storage_quota_mb: parseInt(storage || "0", 10) }); toast.success("Quotas mis à jour"); openDetail({ id }); load(); } catch (e) { toast.error(apiErr(e)); }
+  };
+  const togglePersonalApi = async (id) => {
+    try { 
+      await api.put(`/admin/shops/${id}/personal-api`, { allow_personal_api: !allowPersonalApi }); 
+      toast.success(`API personnalisée ${!allowPersonalApi ? "autorisée" : "désautorisée"}`); 
+      setAllowPersonalApi(!allowPersonalApi);
+      openDetail({ id }); 
+      load(); 
+    } catch (e) { toast.error(apiErr(e)); }
   };
   const suspend = async (id) => { try { await api.put(`/admin/shops/${id}/suspend`, { reason: suspendReason }); toast.success("Boutique suspendue"); openDetail({ id }); load(); } catch (e) { toast.error(apiErr(e)); } };
   const reactivate = async (id) => { try { await api.put(`/admin/shops/${id}/reactivate`); toast.success("Boutique réactivée"); openDetail({ id }); load(); } catch (e) { toast.error(apiErr(e)); } };
@@ -430,6 +441,16 @@ export function AdminShops() {
                     </div>
                   </div>
                   <div className="text-xs text-muted-foreground">Produits : {detail.shop.product_count ?? "—"}{detail.shop.product_quota ? ` / ${detail.shop.product_quota}` : ""} · Stockage : {detail.shop.storage_used_mb ?? 0} Mo{detail.shop.storage_quota_mb ? ` / ${detail.shop.storage_quota_mb} Mo` : ""}</div>
+
+                  <div className="border-t border-border pt-3 mt-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label className="text-sm font-semibold block mb-1">API personnalisée du vendeur</Label>
+                        <p className="text-xs text-muted-foreground">Autoriser ce vendeur à configurer son propre API de paiement</p>
+                      </div>
+                      <Switch checked={allowPersonalApi} onCheckedChange={() => togglePersonalApi(detail.shop.id)} data-testid="toggle-personal-api" />
+                    </div>
+                  </div>
 
                   {detail.shop.suspended ? (
                     <div className="flex items-center justify-between">
