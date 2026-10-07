@@ -645,6 +645,170 @@ async def reset_password(req: ResetReq):
     return {"message": "Mot de passe réinitialisé"}
 
 
+# ================ MOBILE API (Lightweight for Android/iOS) ================
+@api.post("/mobile/auth/register")
+async def mobile_register(req: RegisterReq, background_tasks: BackgroundTasks):
+    """Register new customer account via mobile app (customers only)."""
+    if req.role and req.role != "CLIENT":
+        raise HTTPException(status_code=400, detail="Mobile app: clients only")
+    req.role = "CLIENT"
+    email = req.email.lower().strip()
+    if not email or not req.password or not req.name:
+        raise HTTPException(status_code=400, detail="Email, password, name requis")
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email déjà enregistré")
+    code = str(random.randint(100000, 999999))
+    doc = {
+        "name": req.name.strip(),
+        "email": email,
+        "password_hash": hash_password(req.password),
+        "phone": req.phone or "",
+        "role": "CLIENT",
+        "country": req.country or "",
+        "currency": req.currency or (currency_for_country(req.country)["code"] if req.country else ""),
+        "token_version": 0,
+        "phone_verified": False,
+        "email_verified": False,
+        "email_code": code,
+        "phone_code": DEMO_OTP,
+        "kyc_status": "NONE",
+        "invite_code": gen_invite_code(),
+        "referred_by": None,
+        "is_partner": False,
+        "created_at": now_iso(),
+    }
+    res = await db.users.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    background_tasks.add_task(send_verification_email, email, code)
+    token = create_access_token(str(res.inserted_id), email, "CLIENT", 0)
+    return {"token": token, "user": _user_public(doc),
+            "demo_otp": DEMO_OTP, "message": "Compte créé. Vérifiez votre téléphone et e-mail."}
+
+
+@api.post("/mobile/auth/login")
+async def mobile_login(req: LoginReq, request: Request):
+    """Login via mobile app - returns persistent token for offline use."""
+    email = req.email.lower().strip()
+    ip = _client_ip(request)
+    identifier = f"{ip}:{email}"
+    lock = await db.login_attempts.find_one({"identifier": identifier})
+    if lock and lock.get("count", 0) >= 5:
+        locked_until = lock.get("locked_until")
+        if locked_until and locked_until > now_iso():
+            raise HTTPException(status_code=429, detail="Trop de tentatives. Réessayez plus tard.")
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(req.password, user["password_hash"]):
+        await db.login_attempts.update_one(
+            {"identifier": identifier},
+            {"$set": {"email": email, "locked_until": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()},
+             "$inc": {"count": 1}},
+            upsert=True,
+        )
+        raise HTTPException(status_code=401, detail="Email ou password incorrect")
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Mobile app: clients only")
+    await db.login_attempts.delete_many({"identifier": identifier})
+    if (user.get("status") or "ACTIVE") != "ACTIVE":
+        raise HTTPException(status_code=403, detail="Compte suspendu")
+    await _record_login(user, request)
+    token = create_access_token(str(user["_id"]), email, "CLIENT", user.get("token_version", 0))
+    return {"token": token, "user": _user_public(user), "message": "Connexion réussie"}
+
+
+@api.post("/mobile/auth/logout")
+async def mobile_logout(user: dict = Depends(get_current_user)):
+    """Logout from mobile app - invalidates token by incrementing token_version."""
+    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$inc": {"token_version": 1}})
+    await db.login_attempts.delete_many({"email": user["email"]})
+    return {"message": "Déconnecté"}
+
+
+@api.get("/mobile/auth/me")
+async def mobile_me(user: dict = Depends(get_current_user)):
+    """Get current user info - lightweight response optimized for mobile."""
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    return {"user": _user_public(user)}
+
+
+@api.get("/mobile/products")
+async def mobile_list_products(q: Optional[str] = None, category: Optional[str] = None,
+                               user: dict = Depends(get_current_user)):
+    """List products - lightweight endpoint for mobile with minimal data."""
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    query = {"status": "ACTIVE", "moderation_status": "APPROVED"}
+    if q:
+        query["name"] = {"$regex": q, "$options": "i"}
+    if category:
+        query["category"] = category
+    products = await db.products.find(query).to_list(100)
+    susp = {s["id"] async for s in db.shops.find({"suspended": True}, {"id": 1})}
+    products = [p for p in products if p.get("shop_id") not in susp]
+    result = []
+    for p in products:
+        item = _public_product(p, "SIMPLE")
+        if user.get("location"):
+            shop = await db.shops.find_one({"id": p["shop_id"]})
+            if shop:
+                user_loc = user["location"]
+                user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
+                shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
+                if user_lat and user_lon and shop_lat and shop_lon:
+                    item["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
+        result.append(item)
+    if user.get("location"):
+        result.sort(key=lambda x: (x.get("distance_km", float('inf')),))
+    return {"products": result}
+
+
+@api.get("/mobile/shops")
+async def mobile_list_shops(user: dict = Depends(get_current_user)):
+    """List shops - lightweight endpoint for mobile."""
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    active_countries = await db.countries.find({"active": True}).to_list(200)
+    active_country_names = {c["name"] for c in active_countries}
+    query = {"status": "APPROVED", "suspended": {"$ne": True}, "country": {"$in": list(active_country_names)}}
+    shops = await db.shops.find(query).to_list(100)
+    result = [_public_shop(s) for s in shops]
+    if user.get("location"):
+        for shop in result:
+            user_loc = user["location"]
+            user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
+            shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
+            if user_lat and user_lon and shop_lat and shop_lon:
+                shop["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
+        result.sort(key=lambda x: (x.get("country") != user_loc.get("country"),
+                                   x.get("distance_km", float('inf'))))
+    return {"shops": result}
+
+
+@api.get("/mobile/cart")
+async def mobile_get_cart(user: dict = Depends(get_current_user)):
+    """Get cart items - uses private client context."""
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    cart = await db.private_clients.find_one({"user_id": user["id"]})
+    if not cart:
+        return {"items": [], "count": 0, "total": 0}
+    items = []
+    for item in cart.get("items", []):
+        product = await db.products.find_one({"id": item["product_id"]})
+        if product:
+            items.append({
+                "product_id": item["product_id"],
+                "product_name": product.get("name"),
+                "quantity": item.get("quantity", 1),
+                "price": item.get("price"),
+                "shop_id": product.get("shop_id"),
+            })
+    total = sum(i["price"] * i["quantity"] for i in items)
+    return {"items": items, "count": len(items), "total": total}
+
+
+# ================ END MOBILE API ================
+
 # ---------------- Config ----------------
 @api.get("/config/countries")
 async def get_countries():
