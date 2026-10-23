@@ -327,10 +327,19 @@ async def _log(channel, provider, to, subject, status):
                                      "subject": subject[:120], "status": status, "at": now_iso()})
 
 
-async def send_sms_like(channel: str, phone: str, country: str, text: str) -> str:
-    """SMS / WhatsApp: picks the enabled provider for the country. Sending is SIMULATED (logged only)."""
+async def send_sms_like(channel: str, phone: str, country: str, text: str, purpose: str = "") -> str:
+    """Send SMS through an assigned phone relay, then fall back to configured providers."""
+    if channel == "sms" and purpose == "otp":
+        from sms_relay import enqueue_sms
+
+        relay_operator = await enqueue_sms(country, phone or "", text)
+        if relay_operator:
+            await _log(channel, f"Relais {relay_operator}", phone or "", re.sub(r"\d", "•", text[:60]), "QUEUED")
+            return "RELAY_QUEUED"
     p = await db.comm_providers.find_one({"channel": channel, "enabled": True, "countries": country}) or \
         await db.comm_providers.find_one({"channel": channel, "enabled": True, "countries": []})
+    # Configured online SMS APIs remain available as a fallback for countries
+    # without an enabled phone-relay route.
     status = "SIMULATED" if p else "NO_PROVIDER"
     await _log(channel, p["name"] if p else None, phone or "", re.sub(r"\d", "•", text[:60]), status)
     return status

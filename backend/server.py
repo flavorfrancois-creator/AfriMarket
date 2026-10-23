@@ -35,6 +35,7 @@ import logistics
 import payapis
 import accounts
 import categories
+import sms_relay
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -425,8 +426,8 @@ async def _deliver_otp(user: dict, channel: str, code: str):
     else:
         # SMS / WhatsApp: provider chosen by country; sending is SIMULATED (code shown in logs).
         msg = await messaging.render("auth_otp", user.get("language") or "fr", {"code": code, "name": user.get("name", "")})
-        await send_sms_like(channel, user.get("phone", ""), user.get("country", ""), msg["body"] if msg else code)
-        logger.info("2FA %s OTP for %s: %s", channel.upper(), user.get("phone") or user["email"], code)
+        await send_sms_like(channel, user.get("phone", ""), user.get("country", ""),
+                            msg["body"] if msg else code, purpose="otp")
 
 
 # ---------------- Auth ----------------
@@ -555,7 +556,7 @@ async def login(req: LoginReq, request: Request):
             channel = enabled[0]
         cid, code = await _create_otp_challenge(user, channel)
         await _deliver_otp(user, channel, code)
-        return {"require_2fa": True, "challenge_id": cid, "channel": channel, "dev_code": code}
+        return {"require_2fa": True, "challenge_id": cid, "channel": channel}
 
     await _record_login(user, request)
     token = create_access_token(str(user["_id"]), email, user["role"], user.get("token_version", 0))
@@ -3345,6 +3346,7 @@ app.include_router(messaging.router)
 app.include_router(payapis.router)
 app.include_router(accounts.router)
 app.include_router(categories.router)
+app.include_router(sms_relay.router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=False,

@@ -18,7 +18,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ApiProvidersTab, TemplatesTab, AUTH_AUDIENCE, BUSINESS_AUDIENCES } from "@/components/CommSettings";
+import { ApiProvidersTab, SmsRelaysTab, TemplatesTab, AUTH_AUDIENCE, BUSINESS_AUDIENCES } from "@/components/CommSettings";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -1073,11 +1073,13 @@ export function AdminSecurity() {
   const [s, setS] = useState(null);
   const [channels, setChannels] = useState([]);
   const [cats, setCats] = useState([]);
+  const [countries, setCountries] = useState([]);
   const canSettings = user?.role === "SUPER_ADMIN" || (user?.permissions || []).includes("settings");
   useEffect(() => {
     if (canSettings) {
       api.get("/admin/settings").then((r) => { setS(r.data.settings); setChannels(r.data.channels); }).catch(() => {});
       api.get("/categories").then((r) => setCats(r.data.categories || [])).catch(() => {});
+      api.get("/config/countries").then((r) => setCountries(r.data.countries || [])).catch(() => {});
     }
   }, [canSettings]);
 
@@ -1108,10 +1110,12 @@ export function AdminSecurity() {
         <TabsList className="flex-wrap h-auto mb-4">
           <TabsTrigger value="security" data-testid="auth-tab-security">Sécurité & 2FA</TabsTrigger>
           {canSettings && <TabsTrigger value="apis" data-testid="auth-tab-apis">API d'envoi</TabsTrigger>}
+          {canSettings && <TabsTrigger value="sms-relays" data-testid="auth-tab-sms-relays">Téléphones relais SMS</TabsTrigger>}
           {canSettings && <TabsTrigger value="auth-messages" data-testid="auth-tab-auth-messages">Messages d'authentification</TabsTrigger>}
           {canSettings && <TabsTrigger value="business-messages" data-testid="auth-tab-business-messages">Messages clients & partenaires</TabsTrigger>}
         </TabsList>
         {canSettings && <TabsContent value="apis"><ApiProvidersTab /></TabsContent>}
+        {canSettings && <TabsContent value="sms-relays"><SmsRelaysTab countries={countries} /></TabsContent>}
         {canSettings && <TabsContent value="auth-messages"><TemplatesTab audiences={AUTH_AUDIENCE} /></TabsContent>}
         {canSettings && <TabsContent value="business-messages"><TemplatesTab audiences={BUSINESS_AUDIENCES} /></TabsContent>}
         <TabsContent value="security">

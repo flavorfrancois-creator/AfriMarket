@@ -170,6 +170,146 @@ export function ApiProvidersTab() {
   );
 }
 
+export function SmsRelaysTab({ countries }) {
+  const [relays, setRelays] = useState([]);
+  const [routes, setRoutes] = useState([]);
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [revealedKeys, setRevealedKeys] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    try {
+      const { data } = await api.get("/admin/comm/relays");
+      setRelays(data.relays || []);
+      setRoutes(data.routes || []);
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.post("/admin/comm/relays", { phone, password });
+      setRevealedKeys((keys) => ({ ...keys, [data.relay.id]: data.connection_key }));
+      setPhone("");
+      setPassword("");
+      toast.success("Compte téléphone relais créé");
+      await load();
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setLoading(false); }
+  };
+
+  const setStatus = async (relay, status) => {
+    try {
+      await api.put(`/admin/comm/relays/${relay.id}`, { status });
+      await load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const rotateKey = async (relay) => {
+    if (!window.confirm(`Générer une nouvelle clé pour ${relay.phone} ? L'ancienne clé sera immédiatement invalidée.`)) return;
+    try {
+      const { data } = await api.post(`/admin/comm/relays/${relay.id}/rotate-key`);
+      setRevealedKeys((keys) => ({ ...keys, [relay.id]: data.connection_key }));
+      toast.success("Nouvelle clé générée. Copiez-la maintenant.");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const saveRoute = async (country, value, enabled = true) => {
+    const current = routes.find((route) => route.country === country);
+    try {
+      if (!value) {
+        if (current) await api.delete(`/admin/comm/relay-routes/${encodeURIComponent(country)}`);
+      } else {
+        const [relay_id, sim_id] = value.split(":");
+        await api.put(`/admin/comm/relay-routes/${encodeURIComponent(country)}`, { relay_id, sim_id, enabled });
+      }
+      await load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const availableCountries = [...new Set(relays.filter((r) => r.status === "ACTIVE").flatMap((r) => r.countries || []))];
+  const countryNames = Object.fromEntries(countries.map((c) => [c.name, c.iso2]));
+  const allSims = relays.filter((r) => r.status === "ACTIVE").flatMap((r) =>
+    (r.sims || []).map((sim) => ({ ...sim, relay_id: r.id, relay_phone: r.phone })));
+
+  return (
+    <div className="space-y-5" data-testid="sms-relays">
+      <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="font-display font-bold flex items-center gap-2"><MessageSquare className="w-4 h-4 text-primary" /> Créer un compte téléphone relais</div>
+        <p className="text-xs text-muted-foreground">Le téléphone se connecte avec son numéro, son mot de passe et la clé unique remise à sa création. La clé ne sera plus visible après fermeture de cet écran.</p>
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-2 items-end">
+          <div><Label htmlFor="relay-phone">N° de téléphone</Label><Input id="relay-phone" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+221..." data-testid="relay-create-phone" /></div>
+          <div><Label htmlFor="relay-password">Mot de passe (8 caractères minimum)</Label><Input id="relay-password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} data-testid="relay-create-password" /></div>
+          <Button className="rounded-full" disabled={loading || phone.trim().length < 6 || password.length < 8} onClick={create} data-testid="relay-create">Créer le compte</Button>
+        </div>
+      </div>
+
+      <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="font-display font-bold">Téléphones et cartes SIM enregistrés</div>
+        {relays.length === 0 && <p className="text-sm text-muted-foreground">Aucun compte relais créé.</p>}
+        {relays.map((relay) => (
+          <div key={relay.id} className="border border-border rounded-lg p-4 space-y-3" data-testid={`relay-row-${relay.id}`}>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex-1 min-w-[180px]">
+                <div className="font-semibold">{relay.phone} <span className={`text-xs ${relay.online ? "text-green-600" : "text-muted-foreground"}`}>· {relay.online ? "En ligne" : "Hors ligne"}</span></div>
+                <div className="text-xs text-muted-foreground">Vu : {relay.last_seen ? new Date(relay.last_seen).toLocaleString("fr-FR") : "jamais"} · {relay.status === "ACTIVE" ? "Actif" : "Suspendu"}</div>
+              </div>
+              <Button size="sm" variant="outline" className="rounded-full" onClick={() => rotateKey(relay)} data-testid={`relay-rotate-key-${relay.id}`}>Nouvelle clé</Button>
+              <Button size="sm" variant={relay.status === "ACTIVE" ? "destructive" : "outline"} className="rounded-full" onClick={() => setStatus(relay, relay.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE")} data-testid={`relay-status-${relay.id}`}>
+                {relay.status === "ACTIVE" ? "Suspendre" : "Réactiver"}
+              </Button>
+            </div>
+            {revealedKeys[relay.id] && (
+              <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-950">
+                Clé de connexion à transmettre au téléphone (affichée une seule fois) :
+                <code className="block break-all font-mono mt-1 select-all" data-testid={`relay-key-${relay.id}`}>{revealedKeys[relay.id]}</code>
+              </div>
+            )}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold">SIM détectées</div>
+              {(relay.sims || []).length === 0 && <div className="text-xs text-muted-foreground">Aucune SIM communiquée par l’application.</div>}
+              {(relay.sims || []).map((sim) => (
+                <div key={sim.id} className="flex flex-wrap justify-between gap-2 text-xs border-t border-border/60 pt-2" data-testid={`relay-sim-${sim.id}`}>
+                  <span className="font-medium">#{sim.phone || relay.phone}-{countryNames[sim.country] || sim.country}-{sim.operator}#</span>
+                  <span className="text-muted-foreground">{sim.message_counts?.sent || 0} envoyé(s) · {sim.message_counts?.failed || 0} échec(s) · {sim.message_counts?.queued || 0} en attente</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+        <div className="font-display font-bold">Affecter une SIM à chaque pays</div>
+        <p className="text-xs text-muted-foreground">Les OTP SMS du pays sont envoyés par l’application relais via la SIM sélectionnée. Une seule SIM est affectée par pays. Sans affectation active, le fournisseur SMS configuré reste utilisé.</p>
+        {availableCountries.length === 0 && <p className="text-sm text-muted-foreground">Les pays apparaîtront après leur sélection dans l’application relais.</p>}
+        {availableCountries.map((country) => {
+          const route = routes.find((item) => item.country === country);
+          const value = route ? `${route.relay_id}:${route.sim_id}` : "";
+          const options = allSims.filter((sim) => sim.country === country);
+          return (
+            <div key={country} className="grid grid-cols-1 md:grid-cols-[minmax(150px,0.7fr)_1fr_auto] items-center gap-3 border-t border-border/60 pt-3" data-testid={`relay-route-${country}`}>
+              <div className="text-sm font-medium">{country}</div>
+              <Select value={value} onValueChange={(v) => saveRoute(country, v)}>
+                <SelectTrigger data-testid={`relay-route-select-${country}`}><SelectValue placeholder="Sélectionner une SIM" /></SelectTrigger>
+                <SelectContent>
+                  {options.map((sim) => {
+                    const label = `#${sim.phone || sim.relay_phone}-${countryNames[country] || country}-${sim.operator}#`;
+                    return <SelectItem key={`${sim.relay_id}:${sim.id}`} value={`${sim.relay_id}:${sim.id}`}>{label}</SelectItem>;
+                  })}
+                </SelectContent>
+              </Select>
+              {route && <label className="flex items-center gap-2 text-xs"><Switch checked={!!route.enabled} onCheckedChange={(v) => saveRoute(country, value, v)} data-testid={`relay-route-enabled-${country}`} /> Envoi actif</label>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function TemplateEditor({ t, onSaved }) {
   const [lang, setLang] = useState("fr");
   const [c, setC] = useState(t.content);
