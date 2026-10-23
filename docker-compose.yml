@@ -26,6 +26,9 @@ services:
       EMERGENT_EMAIL_KEY: ${EMERGENT_EMAIL_KEY:-}
       EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-AfriMarket}
       EMERGENT_LLM_KEY: ${EMERGENT_LLM_KEY:-}
+      EMAIL_ENCRYPTION_KEY: ${EMAIL_ENCRYPTION_KEY:?Set EMAIL_ENCRYPTION_KEY in Coolify}
+      FX_API_URL: ${FX_API_URL:-https://open.er-api.com/v6/latest/USD}
+      WEBHOOK_CRON_SECRET: ${WEBHOOK_CRON_SECRET:-}
     depends_on:
       mongo:
         condition: service_healthy

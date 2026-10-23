@@ -64,6 +64,8 @@ EMERGENT_LLM_KEY="<clé Emergent>"                      # requis pour l'upload d
 
 > **Stockage objet / upload d'images** : l'upload des images produits (galerie) et le service des fichiers (`/api/files/...`) utilisent le stockage objet Emergent via `EMERGENT_LLM_KEY`. Sans cette clé, l'application démarre normalement mais l'upload de fichiers échouera (les URLs d'images externes restent utilisables). En déploiement Emergent, la clé est fournie automatiquement dans l'onglet Secrets.
 
+Pour les déploiements Docker/Coolify, configurez également `EMAIL_ENCRYPTION_KEY` avec une clé Fernet persistante (générez-en une avec `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`). Ne la faites pas tourner après avoir enregistré des identifiants de fournisseurs de messagerie ou de paiement chiffrés. `FX_API_URL` utilise par défaut `https://open.er-api.com/v6/latest/USD`; `WEBHOOK_CRON_SECRET` doit être configuré lorsque les tâches cron authentifiées sont activées.
+
 Lancer :
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8001
