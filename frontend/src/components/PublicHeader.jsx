@@ -1,10 +1,11 @@
 import React, { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useI18n } from "@/lib/i18n";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { usePrivateClient } from "@/context/PrivateClientContext";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { CurrencySwitcher } from "@/components/CurrencySwitcher";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -19,6 +20,7 @@ export function PublicHeader() {
   const { count } = useCart();
   const { active, client, clear } = usePrivateClient();
   const navigate = useNavigate();
+  const location = useLocation();
   const [q, setQ] = useState("");
 
   const submitSearch = (e) => {
@@ -30,6 +32,8 @@ export function PublicHeader() {
     if (!user) return "/login";
     if (user.role === "SUPER_ADMIN" || user.role === "ADMIN") return "/admin";
     if (user.role === "MERCHANT") return "/merchant";
+    if (user.role === "RELAY_MANAGER" || user.role === "CARRIER_AGENT") return "/partner";
+    if (user.role !== "CLIENT") return "/admin";
     return "/account";
   };
 
@@ -60,6 +64,7 @@ export function PublicHeader() {
               <Link to="/register?role=merchant" className="px-3 py-2 rounded-lg hover:bg-accent font-medium text-primary">
                 {t("become_merchant")}
               </Link>
+              {!user && <div className="px-3 pt-3" data-testid="mobile-currency"><CurrencySwitcher /></div>}
             </nav>
           </SheetContent>
         </Sheet>
@@ -92,6 +97,7 @@ export function PublicHeader() {
 
         <div className="flex items-center gap-1.5 ml-auto sm:ml-0">
           <LanguageSwitcher compact />
+          {!user && <div className="hidden sm:block"><CurrencySwitcher /></div>}
 
           <Link to="/cart" className="relative" data-testid="cart-link">
             <Button variant="ghost" size="icon" className="rounded-full">
@@ -133,7 +139,7 @@ export function PublicHeader() {
             </DropdownMenu>
           ) : (
             <>
-              <Button variant="ghost" className="rounded-full hidden sm:inline-flex" onClick={() => navigate("/login")} data-testid="login-btn">
+              <Button variant="ghost" className="rounded-full hidden sm:inline-flex" onClick={() => navigate("/login", { state: { from: location.pathname + location.search } })} data-testid="login-btn">
                 {t("login")}
               </Button>
               <Button className="rounded-full" onClick={() => navigate("/register")} data-testid="register-btn">

@@ -4,7 +4,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import {
-  MapPin, Truck, PackageCheck, Package, ClipboardCheck, ShoppingBag, CheckCircle2, XCircle, RotateCcw, AlertTriangle, Clock,
+  MapPin, Truck, PackageCheck, Package, ClipboardCheck, ShoppingBag, CheckCircle2, XCircle, RotateCcw, AlertTriangle, Clock, Route,
 } from "lucide-react";
 
 const FLOW = [
@@ -35,6 +35,28 @@ function fmtDate(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return "";
   return d.toLocaleDateString("fr-FR", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+}
+
+export function RouteEvents({ events }) {
+  if (!events?.length) return null;
+  const list = [...events].reverse();
+  return (
+    <div className="mt-4" data-testid="route-events">
+      <div className="text-sm font-semibold mb-2 flex items-center gap-2"><Route className="w-4 h-4 text-primary" /> Parcours du colis</div>
+      <ol className="border-l-2 border-primary/30 ml-2 space-y-3">
+        {list.map((e, i) => (
+          <li key={e.id} className="pl-4 relative" data-testid={`route-event-${e.id}`}>
+            <span className={`absolute -left-[7px] top-1 w-3 h-3 rounded-full ${i === 0 ? "bg-primary ring-4 ring-primary/20" : "bg-primary/40"}`} />
+            <div className="text-sm font-medium">{e.label}{e.method === "SCAN" && <span className="ml-2 text-[10px] bg-muted px-1.5 py-0.5 rounded-full">scan</span>}</div>
+            <div className="text-xs text-muted-foreground">{e.location}</div>
+            {e.courier_name && <div className="text-xs">Livreur local : <strong>{e.courier_name}</strong> ({e.courier_phone})</div>}
+            {e.note && <div className="text-xs italic">{e.note}</div>}
+            <div className="text-[11px] text-muted-foreground">{fmtDateTime(e.at)} · {e.by_role === "CARRIER_AGENT" ? "Transporteur" : "Point relais"}</div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
 }
 
 function TrackingTimeline({ order }) {
@@ -123,7 +145,7 @@ function TrackingTimeline({ order }) {
                 <div className="pt-1 min-w-0">
                   <div className={`text-sm font-semibold ${reached ? "text-foreground" : "text-muted-foreground"}`}>
                     {step.label}
-                    {isCurrent && <span className="ml-2 text-[10px] bg-primary/15 text-primary px-1.5 py-0.5 rounded-full align-middle">En cours</span>}
+                    {isCurrent && status !== "LIVREE" && <span className="ml-2 text-[10px] bg-primary/15 text-primary px-1.5 py-0.5 rounded-full align-middle">En cours</span>}
                   </div>
                   {at ? (
                     <div className="text-xs text-muted-foreground">{fmtDateTime(at)}</div>
@@ -136,6 +158,13 @@ function TrackingTimeline({ order }) {
           })}
         </ol>
       )}
+      {order.last_mile && order.status === "EXPEDIEE" && (
+        <div className="mt-4 text-sm bg-green-50 border border-green-200 rounded-lg p-3" data-testid="tracking-last-mile">
+          {order.last_mile === "AVAILABLE_PICKUP" ? "Votre colis vous attend au point relais." : "Votre colis est en cours de remise par un livreur local."}{" "}
+          Confirmez la réception avec votre code <strong className="font-mono">{order.tracking_number || order.ref}</strong>.
+        </div>
+      )}
+      <RouteEvents events={order.route_events} />
     </div>
   );
 }
@@ -144,7 +173,7 @@ export function TrackingDialog({ order, onClose }) {
   if (!order) return null;
   return (
     <Dialog open={!!order} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Suivi de commande — {order.ref}</DialogTitle>
           <DialogDescription>{order.shop_name} · {order.items?.length || 0} article(s)</DialogDescription>

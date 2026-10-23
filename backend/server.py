@@ -19,6 +19,8 @@ from db import db, client, now_iso, new_id, gen_invite_code, gen_order_ref, gen_
 from security import (hash_password, verify_password, create_access_token, get_current_user,
                       require_roles)
 from emailer import send_verification_email, send_password_reset_email, send_2fa_code
+from messaging import send_message, send_to_users, send_sms_like
+import messaging
 from config_data import COUNTRIES, CURRENCIES, currency_for_country
 from business import (CUSTOMER_TYPES, compute_line, compute_margin, process_payment, get_customer_type,
                       add_wallet_tx, wallet_balances, audit_log, notify, promo_active, price_for_type)
@@ -28,6 +30,11 @@ from rbac import require_admin_level, resolve_commission_rate
 import finance
 import seed as seed_module
 import storage
+import fx
+import logistics
+import payapis
+import accounts
+import categories
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,6 +58,10 @@ class RegisterReq(BaseModel):
     country: Optional[str] = ""
     currency: Optional[str] = ""
     invite_code: Optional[str] = None
+    relay_point_id: Optional[str] = None
+    carrier_id: Optional[str] = None
+    proposed_relay: Optional[dict] = None
+    language: Optional[str] = "fr"
 
 
 class LoginReq(BaseModel):
@@ -72,30 +83,17 @@ class StaffCreateReq(BaseModel):
     email: EmailStr
     password: str
     role: str
-    phone: str
-    phone_verification_id: str
-    country_scopes: List[str] = []
     permissions: Optional[dict] = None
     shop_ids: List[str] = []
 
 
 class StaffUpdateReq(BaseModel):
     role: Optional[str] = None
-    country_scopes: Optional[List[str]] = None
     permissions: Optional[dict] = None
     shop_ids: Optional[List[str]] = None
     status: Optional[str] = None
     delegation: Optional[dict] = None
     password: Optional[str] = None
-
-
-class StaffPhoneOtpReq(BaseModel):
-    phone: str
-
-
-class StaffPhoneOtpVerifyReq(BaseModel):
-    verification_id: str
-    code: str
 
 
 class SettingsReq(BaseModel):
@@ -113,6 +111,18 @@ class SettingsReq(BaseModel):
     legal_content: Optional[dict] = None
     taxes_enabled: Optional[bool] = None
     csv_import_enabled: Optional[bool] = None
+    customs_enabled: Optional[bool] = None
+    intl_shipping_currency: Optional[str] = None
+    intl_shipping_base: Optional[float] = None
+    intl_shipping_per_kg: Optional[float] = None
+    intl_shipping_per_km: Optional[float] = None
+    intl_default_weight_kg: Optional[float] = None
+
+
+class CustomsRuleReq(BaseModel):
+    country: Optional[str] = None
+    rate_percent: Optional[float] = None
+    enabled: Optional[bool] = None
 
 
 class ShopCommissionReq(BaseModel):
@@ -230,6 +240,8 @@ class CheckoutReq(BaseModel):
     private_client: Optional[dict] = None
     use_wallet: bool = False
     wallet_amount: Optional[float] = None
+    customs_payment: str = "NOW"
+    payment_api_id: Optional[str] = None
 
 
 class OrderStatusReq(BaseModel):
@@ -284,6 +296,7 @@ class WithdrawReq(BaseModel):
     destination: Optional[str] = ""
     bank_name: Optional[str] = ""
     account_name: Optional[str] = ""
+    payment_api_id: Optional[str] = None
 
 
 class WithdrawDecisionReq(BaseModel):
@@ -308,51 +321,14 @@ class PrivateClientReq(BaseModel):
     address: Optional[str] = ""
 
 
-class CountryPaymentApiReq(BaseModel):
-    country: str
-    name: str
-    provider: str
-    api_key: str
+class PaymentProviderReq(BaseModel):
+    provider: str = "MONITY_WORLD"
+    api_key: Optional[str] = ""
     account: Optional[str] = ""
-    active: bool = True
-
-
-class CountryPaymentApiUpdateReq(BaseModel):
-    name: Optional[str] = None
-    provider: Optional[str] = None
-    api_key: Optional[str] = None
-    account: Optional[str] = None
-    active: Optional[bool] = None
-
-
-class ShopPersonalApiToggleReq(BaseModel):
-    allow_personal_api: bool
-
-
-class CountryToggleReq(BaseModel):
-    active: bool
-
-
-class CategoryReq(BaseModel):
-    name: str
-    description: Optional[str] = ""
-
-
-class SubcategoryReq(BaseModel):
-    category_id: str
-    name: str
-    description: Optional[str] = ""
 
 
 class ConfirmReceiptReq(BaseModel):
     code: str
-
-
-class UserLocationReq(BaseModel):
-    country: str
-    city: Optional[str] = ""
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
 
 
 # ---------------- Helpers ----------------
@@ -368,8 +344,7 @@ def _user_public(user: dict) -> dict:
         "phone": user.get("phone", ""),
         "role": user.get("role"),
         "country": user.get("country", ""),
-        "country_scopes": user.get("country_scopes", []),
-        "currency": user.get("currency", ""),
+        "currency": user.get("currency") or (currency_for_country(user["country"])["code"] if user.get("country") else ""),
         "phone_verified": user.get("phone_verified", False),
         "email_verified": user.get("email_verified", False),
         "kyc_status": user.get("kyc_status", "NONE"),
@@ -383,22 +358,49 @@ def _user_public(user: dict) -> dict:
         "two_factor_enabled": user.get("two_factor_enabled", False),
         "two_factor_channel": user.get("two_factor_channel", "email"),
         "permissions": sorted(effective_permissions(user)),
+        "relay_point_id": user.get("relay_point_id"),
+        "carrier_id": user.get("carrier_id"),
+        "relay_edit_mode": user.get("relay_edit_mode", "NONE"),
+        "language": user.get("language") or "fr",
+        "last_seen": user.get("last_seen"),
+        "online": _is_online(user.get("last_seen")),
     }
+
+
+def _is_online(last_seen) -> bool:
+    if not last_seen:
+        return False
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(last_seen) < timedelta(minutes=5)
+    except Exception:
+        return False
 
 
 import hashlib as _hashlib
 
 
 async def _record_login(user: dict, request: Request):
+    uid = str(user.get("_id", user.get("id")))
+    ip, ua = _client_ip(request), request.headers.get("user-agent", "?")[:400]
+    prev = await db.login_journal.find_one({"user_id": uid}, sort=[("created_at", -1)])
     await db.login_journal.insert_one({
         "id": new_id(),
-        "user_id": str(user.get("_id", user.get("id"))),
+        "user_id": uid,
         "email": user.get("email"),
         "role": user.get("role"),
-        "ip": _client_ip(request),
-        "user_agent": request.headers.get("user-agent", "?")[:400],
+        "ip": ip,
+        "user_agent": ua,
         "created_at": now_iso(),
     })
+    await db.users.update_one({"_id": ObjectId(uid)}, {"$set": {"last_seen": now_iso()}})
+    if prev and (prev.get("ip") != ip or prev.get("user_agent") != ua):
+        await send_message(uid, "auth_new_login", {"ip": ip, "device": ua[:80],
+                                                   "date": datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")},
+                           ntype="SECURITY")
+
+
+def _m(amount, cur) -> str:
+    return f"{float(amount or 0):,.2f}".replace(",", "\u202f").replace(".", ",") + f" {cur or ''}".rstrip()
 
 
 async def _create_otp_challenge(user: dict, channel: str) -> tuple:
@@ -419,48 +421,54 @@ async def _create_otp_challenge(user: dict, channel: str) -> tuple:
 
 async def _deliver_otp(user: dict, channel: str, code: str):
     if channel == "email":
-        await send_2fa_code(user["email"], code)
+        await send_2fa_code(user["email"], code, user.get("language") or "fr", user.get("name", ""))
     else:
-        # SMS / WhatsApp are modular MOCK channels (code shown in logs).
+        # SMS / WhatsApp: provider chosen by country; sending is SIMULATED (code shown in logs).
+        msg = await messaging.render("auth_otp", user.get("language") or "fr", {"code": code, "name": user.get("name", "")})
+        await send_sms_like(channel, user.get("phone", ""), user.get("country", ""), msg["body"] if msg else code)
         logger.info("2FA %s OTP for %s: %s", channel.upper(), user.get("phone") or user["email"], code)
 
 
-def _normalize_phone(phone: str) -> str:
-    normalized = "".join(char for char in (phone or "").strip() if char.isdigit() or char == "+")
-    if not normalized.startswith("+") or not normalized[1:].isdigit() or not 8 <= len(normalized[1:]) <= 15:
-        raise HTTPException(status_code=400, detail="Numéro de téléphone international invalide")
-    return normalized
-
-
-async def _validate_staff_scope(country_scopes: List[str], shop_ids: List[str]) -> tuple:
-    allowed_countries = {country["name"] for country in COUNTRIES}
-    scopes = list(dict.fromkeys(country.strip() for country in country_scopes if country.strip()))
-    if not scopes:
-        raise HTTPException(status_code=400, detail="Sélectionnez au moins un pays")
-    invalid_countries = set(scopes) - allowed_countries
-    if invalid_countries:
-        raise HTTPException(status_code=400, detail="Pays non pris en charge")
-
-    ids = list(dict.fromkeys(shop_ids))
-    if not ids:
-        return scopes, ids
-    shops = await db.shops.find({"id": {"$in": ids}}).to_list(len(ids))
-    if len(shops) != len(ids):
-        raise HTTPException(status_code=400, detail="Une ou plusieurs boutiques sont introuvables")
-    if any(shop.get("country") not in scopes for shop in shops):
-        raise HTTPException(status_code=400, detail="Les boutiques doivent appartenir aux pays sélectionnés")
-    return scopes, ids
-
-
 # ---------------- Auth ----------------
+async def _register_partner(req: RegisterReq, email: str, role: str) -> dict:
+    """Relay managers / carrier agents self-register as PENDING; no token until admin approval."""
+    if len(req.password or "") < 6:
+        raise HTTPException(status_code=400, detail="Mot de passe trop court (6 caractères minimum)")
+    proposed = None
+    if role == "RELAY_MANAGER" and not req.relay_point_id:
+        p = req.proposed_relay or {}
+        if not (p.get("name") or "").strip() or not (p.get("city") or "").strip():
+            raise HTTPException(status_code=400, detail="Choisissez un point relais ou décrivez le vôtre (nom, ville)")
+        proposed = {k: str(p.get(k) or "").strip()[:200] for k in ("name", "city", "address")}
+        proposed["country"] = req.country or ""
+    if role == "CARRIER_AGENT" and not req.carrier_id:
+        raise HTTPException(status_code=400, detail="Choisissez votre transporteur")
+    doc = {"name": req.name.strip(), "email": email, "password_hash": hash_password(req.password),
+           "phone": req.phone or "", "role": role, "country": req.country or "", "status": "PENDING",
+           "relay_point_id": req.relay_point_id if role == "RELAY_MANAGER" else None,
+           "carrier_id": req.carrier_id if role == "CARRIER_AGENT" else None,
+           "proposed_relay": proposed, "relay_edit_mode": "NONE", "token_version": 0, "created_at": now_iso(),
+           "language": req.language if req.language in messaging.LANGS else "fr"}
+    res = await db.users.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await accounts.check_restore(doc)
+    for admin in await db.users.find({"role": {"$in": ["SUPER_ADMIN", "ADMIN"]}}, {"_id": 1}).to_list(50):
+        await notify(str(admin["_id"]), "PARTNER_SIGNUP", "Nouveau partenaire logistique",
+                     f"{doc['name']} ({role}) attend une validation.", "/admin/logistics")
+    return {"pending": True, "user_id": str(res.inserted_id),
+            "message": "Inscription envoyée. Votre compte sera actif après validation par l'administrateur."}
+
+
 @api.post("/auth/register")
 async def register(req: RegisterReq, background_tasks: BackgroundTasks):
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Cet e-mail est déjà utilisé")
     role = req.role.upper()
-    if role not in ("CLIENT", "MERCHANT"):
+    if role not in ("CLIENT", "MERCHANT", "RELAY_MANAGER", "CARRIER_AGENT"):
         role = "CLIENT"
+    if role in logistics.PARTNER_ROLES:
+        return await _register_partner(req, email, role)
 
     referred_by = None
     if req.invite_code:
@@ -476,6 +484,7 @@ async def register(req: RegisterReq, background_tasks: BackgroundTasks):
         "phone": req.phone or "",
         "role": role,
         "country": req.country or "",
+        "language": req.language if req.language in messaging.LANGS else "fr",
         "currency": req.currency or (currency_for_country(req.country)["code"] if req.country else ""),
         "token_version": 0,
         "phone_verified": False,
@@ -500,10 +509,14 @@ async def register(req: RegisterReq, background_tasks: BackgroundTasks):
         await notify(referred_by, "REFERRAL", "Nouveau filleul",
                      f"{req.name} s'est inscrit avec votre code INVITE.")
 
-    background_tasks.add_task(send_verification_email, email, code)
+    background_tasks.add_task(send_verification_email, email, code, doc["language"], doc["name"])
+    restore = await accounts.check_restore(doc)
     token = create_access_token(str(res.inserted_id), email, role, 0)
-    return {"token": token, "user": _user_public(doc),
-            "demo_otp": DEMO_OTP, "message": "Compte créé. Vérifiez votre téléphone et votre e-mail."}
+    msg = "Compte créé. Vérifiez votre téléphone et votre e-mail."
+    if restore:
+        msg += " Un ancien compte supprimé correspond à vos informations : une demande de restauration a été envoyée aux administrateurs."
+    return {"token": token, "user": _user_public(doc), "restore_requested": restore,
+            "demo_otp": DEMO_OTP, "message": msg}
 
 
 @api.post("/auth/login")
@@ -529,6 +542,8 @@ async def login(req: LoginReq, request: Request):
 
     await db.login_attempts.delete_many({"identifier": identifier})
 
+    if user.get("status") == "PENDING":
+        raise HTTPException(status_code=403, detail="Compte en attente de validation par l'administrateur.")
     if (user.get("status") or "ACTIVE") != "ACTIVE":
         raise HTTPException(status_code=403, detail="Compte suspendu ou désactivé. Contactez un administrateur.")
 
@@ -592,7 +607,7 @@ async def verify_phone(req: VerifyReq, user: dict = Depends(get_current_user)):
 async def resend_email(background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     code = str(random.randint(100000, 999999))
     await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"email_code": code}})
-    background_tasks.add_task(send_verification_email, user["email"], code)
+    background_tasks.add_task(send_verification_email, user["email"], code, user.get("language") or "fr", user.get("name", ""))
     return {"message": "E-mail de vérification renvoyé"}
 
 
@@ -622,7 +637,7 @@ async def forgot_password(req: ForgotReq, background_tasks: BackgroundTasks):
         "token_hash": token_hash, "user_id": str(user["_id"]), "email": email,
         "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(), "used": False,
     })
-    background_tasks.add_task(send_password_reset_email, user["email"], token)
+    background_tasks.add_task(send_password_reset_email, user["email"], token, user.get("language") or "fr", user.get("name", ""))
     return generic
 
 
@@ -642,393 +657,37 @@ async def reset_password(req: ResetReq):
     )
     await db.password_reset_tokens.delete_many({"user_id": doc["user_id"], "used": False})
     await db.login_attempts.delete_many({"email": doc["email"]})
+    await send_message(doc["user_id"], "auth_password_changed", {}, ntype="SECURITY")
     return {"message": "Mot de passe réinitialisé"}
 
 
-# ================ MOBILE API (Lightweight for Android/iOS) ================
-@api.post("/mobile/auth/register")
-async def mobile_register(req: RegisterReq, background_tasks: BackgroundTasks):
-    """Register new customer account via mobile app (customers only)."""
-    if req.role and req.role != "CLIENT":
-        raise HTTPException(status_code=400, detail="Mobile app: clients only")
-    req.role = "CLIENT"
-    email = req.email.lower().strip()
-    if not email or not req.password or not req.name:
-        raise HTTPException(status_code=400, detail="Email, password, name requis")
-    if await db.users.find_one({"email": email}):
-        raise HTTPException(status_code=400, detail="Email déjà enregistré")
-    code = str(random.randint(100000, 999999))
-    doc = {
-        "name": req.name.strip(),
-        "email": email,
-        "password_hash": hash_password(req.password),
-        "phone": req.phone or "",
-        "role": "CLIENT",
-        "country": req.country or "",
-        "currency": req.currency or (currency_for_country(req.country)["code"] if req.country else ""),
-        "token_version": 0,
-        "phone_verified": False,
-        "email_verified": False,
-        "email_code": code,
-        "phone_code": DEMO_OTP,
-        "kyc_status": "NONE",
-        "invite_code": gen_invite_code(),
-        "referred_by": None,
-        "is_partner": False,
-        "created_at": now_iso(),
-    }
-    res = await db.users.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    background_tasks.add_task(send_verification_email, email, code)
-    token = create_access_token(str(res.inserted_id), email, "CLIENT", 0)
-    return {"token": token, "user": _user_public(doc),
-            "demo_otp": DEMO_OTP, "message": "Compte créé. Vérifiez votre téléphone et e-mail."}
+class LanguageReq(BaseModel):
+    language: str
 
 
-@api.post("/mobile/auth/login")
-async def mobile_login(req: LoginReq, request: Request):
-    """Login via mobile app - returns persistent token for offline use."""
-    email = req.email.lower().strip()
-    ip = _client_ip(request)
-    identifier = f"{ip}:{email}"
-    lock = await db.login_attempts.find_one({"identifier": identifier})
-    if lock and lock.get("count", 0) >= 5:
-        locked_until = lock.get("locked_until")
-        if locked_until and locked_until > now_iso():
-            raise HTTPException(status_code=429, detail="Trop de tentatives. Réessayez plus tard.")
-    user = await db.users.find_one({"email": email})
-    if not user or not verify_password(req.password, user["password_hash"]):
-        await db.login_attempts.update_one(
-            {"identifier": identifier},
-            {"$set": {"email": email, "locked_until": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()},
-             "$inc": {"count": 1}},
-            upsert=True,
-        )
-        raise HTTPException(status_code=401, detail="Email ou password incorrect")
-    if user.get("role") != "CLIENT":
-        raise HTTPException(status_code=403, detail="Mobile app: clients only")
-    await db.login_attempts.delete_many({"identifier": identifier})
-    if (user.get("status") or "ACTIVE") != "ACTIVE":
-        raise HTTPException(status_code=403, detail="Compte suspendu")
-    await _record_login(user, request)
-    token = create_access_token(str(user["_id"]), email, "CLIENT", user.get("token_version", 0))
-    return {"token": token, "user": _user_public(user), "message": "Connexion réussie"}
+@api.put("/auth/language")
+async def set_language(req: LanguageReq, user: dict = Depends(get_current_user)):
+    if req.language not in messaging.LANGS:
+        raise HTTPException(status_code=400, detail="Langue non supportée")
+    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"language": req.language}})
+    return {"language": req.language}
 
 
-@api.post("/mobile/auth/logout")
-async def mobile_logout(user: dict = Depends(get_current_user)):
-    """Logout from mobile app - invalidates token by incrementing token_version."""
-    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$inc": {"token_version": 1}})
-    await db.login_attempts.delete_many({"email": user["email"]})
+@api.post("/auth/logout")
+async def logout(user: dict = Depends(get_current_user)):
+    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"last_seen": None}})
     return {"message": "Déconnecté"}
 
-
-@api.get("/mobile/auth/me")
-async def mobile_me(user: dict = Depends(get_current_user)):
-    """Get current user info - lightweight response optimized for mobile."""
-    if user.get("role") != "CLIENT":
-        raise HTTPException(status_code=403, detail="Clients only")
-    return {"user": _user_public(user)}
-
-
-@api.get("/mobile/products")
-async def mobile_list_products(q: Optional[str] = None, category: Optional[str] = None,
-                               user: dict = Depends(get_current_user)):
-    """List products - lightweight endpoint for mobile with minimal data."""
-    if user.get("role") != "CLIENT":
-        raise HTTPException(status_code=403, detail="Clients only")
-    query = {"status": "ACTIVE", "moderation_status": "APPROVED"}
-    if q:
-        query["name"] = {"$regex": q, "$options": "i"}
-    if category:
-        query["category"] = category
-    products = await db.products.find(query).to_list(100)
-    susp = {s["id"] async for s in db.shops.find({"suspended": True}, {"id": 1})}
-    products = [p for p in products if p.get("shop_id") not in susp]
-    result = []
-    for p in products:
-        item = _public_product(p, "SIMPLE")
-        if user.get("location"):
-            shop = await db.shops.find_one({"id": p["shop_id"]})
-            if shop:
-                user_loc = user["location"]
-                user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
-                shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
-                if user_lat and user_lon and shop_lat and shop_lon:
-                    item["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
-        result.append(item)
-    if user.get("location"):
-        result.sort(key=lambda x: (x.get("distance_km", float('inf')),))
-    return {"products": result}
-
-
-@api.get("/mobile/shops")
-async def mobile_list_shops(user: dict = Depends(get_current_user)):
-    """List shops - lightweight endpoint for mobile."""
-    if user.get("role") != "CLIENT":
-        raise HTTPException(status_code=403, detail="Clients only")
-    active_countries = await db.countries.find({"active": True}).to_list(200)
-    active_country_names = {c["name"] for c in active_countries}
-    query = {"status": "APPROVED", "suspended": {"$ne": True}, "country": {"$in": list(active_country_names)}}
-    shops = await db.shops.find(query).to_list(100)
-    result = [_public_shop(s) for s in shops]
-    if user.get("location"):
-        for shop in result:
-            user_loc = user["location"]
-            user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
-            shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
-            if user_lat and user_lon and shop_lat and shop_lon:
-                shop["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
-        result.sort(key=lambda x: (x.get("country") != user_loc.get("country"),
-                                   x.get("distance_km", float('inf'))))
-    return {"shops": result}
-
-
-@api.get("/mobile/cart")
-async def mobile_get_cart(user: dict = Depends(get_current_user)):
-    """Get cart items - uses private client context."""
-    if user.get("role") != "CLIENT":
-        raise HTTPException(status_code=403, detail="Clients only")
-    cart = await db.private_clients.find_one({"user_id": user["id"]})
-    if not cart:
-        return {"items": [], "count": 0, "total": 0}
-    items = []
-    for item in cart.get("items", []):
-        product = await db.products.find_one({"id": item["product_id"]})
-        if product:
-            items.append({
-                "product_id": item["product_id"],
-                "product_name": product.get("name"),
-                "quantity": item.get("quantity", 1),
-                "price": item.get("price"),
-                "shop_id": product.get("shop_id"),
-            })
-    total = sum(i["price"] * i["quantity"] for i in items)
-    return {"items": items, "count": len(items), "total": total}
-
-
-# ================ END MOBILE API ================
 
 # ---------------- Config ----------------
 @api.get("/config/countries")
 async def get_countries():
-    countries = await db.countries.find({"active": True}).sort("name", 1).to_list(200)
-    result = [{"name": c["name"], "iso2": c["iso2"], "currency": c["currency"]} for c in countries]
-    return {"countries": result}
+    return {"countries": COUNTRIES}
 
 
 @api.get("/config/currencies")
 async def get_currencies():
     return {"currencies": CURRENCIES}
-
-
-def _payment_api_public(payment_api: dict) -> dict:
-    return {
-        "id": payment_api["id"],
-        "country": payment_api["country"],
-        "name": payment_api["name"],
-        "provider": payment_api["provider"],
-        "account": payment_api.get("account", ""),
-        "active": payment_api.get("active", True),
-        "api_key_configured": bool(payment_api.get("api_key")),
-        "created_at": payment_api.get("created_at"),
-    }
-
-
-@api.get("/admin/payment-apis")
-async def list_country_payment_apis(country: Optional[str] = None,
-                                    user: dict = Depends(require_module("settings"))):
-    query = {"country": country} if country else {}
-    payment_apis = await db.country_payment_apis.find(query).sort([("country", 1), ("created_at", 1)]).to_list(500)
-    return {"payment_apis": [_payment_api_public(payment_api) for payment_api in payment_apis]}
-
-
-@api.post("/admin/payment-apis")
-async def create_country_payment_api(req: CountryPaymentApiReq, request: Request,
-                                     user: dict = Depends(require_module("settings"))):
-    country = req.country.strip()
-    if country not in {item["name"] for item in COUNTRIES}:
-        raise HTTPException(status_code=400, detail="Pays non pris en charge")
-    name, provider, api_key = req.name.strip(), req.provider.strip(), req.api_key.strip()
-    if not name or not provider or not api_key:
-        raise HTTPException(status_code=400, detail="Nom, fournisseur et clé API sont requis")
-    count = await db.country_payment_apis.count_documents({"country": country})
-    if count >= 10:
-        raise HTTPException(status_code=400, detail="Maximum de 10 API de paiement par pays atteint")
-    payment_api = {
-        "id": new_id(), "country": country, "name": name, "provider": provider,
-        "api_key": api_key, "account": req.account.strip(), "active": bool(req.active),
-        "created_at": now_iso(), "created_by": user["id"],
-    }
-    await db.country_payment_apis.insert_one(payment_api)
-    await audit_log(user, "CREATE_COUNTRY_PAYMENT_API", "payment_api", payment_api["id"], None, country,
-                    _client_ip(request))
-    return {"payment_api": _payment_api_public(payment_api)}
-
-
-@api.put("/admin/payment-apis/{payment_api_id}")
-async def update_country_payment_api(payment_api_id: str, req: CountryPaymentApiUpdateReq, request: Request,
-                                     user: dict = Depends(require_module("settings"))):
-    payment_api = await db.country_payment_apis.find_one({"id": payment_api_id})
-    if not payment_api:
-        raise HTTPException(status_code=404, detail="API de paiement introuvable")
-    updates = {}
-    for field in ("name", "provider"):
-        value = getattr(req, field)
-        if value is not None:
-            value = value.strip()
-            if not value:
-                raise HTTPException(status_code=400, detail=f"{field} ne peut pas être vide")
-            updates[field] = value
-    if req.account is not None:
-        updates["account"] = req.account.strip()
-    if req.api_key is not None:
-        if not req.api_key.strip():
-            raise HTTPException(status_code=400, detail="La clé API ne peut pas être vide")
-        updates["api_key"] = req.api_key.strip()
-    if req.active is not None:
-        updates["active"] = req.active
-    if not updates:
-        return {"payment_api": _payment_api_public(payment_api)}
-    await db.country_payment_apis.update_one({"_id": payment_api["_id"]}, {"$set": updates})
-    await audit_log(user, "UPDATE_COUNTRY_PAYMENT_API", "payment_api", payment_api_id, None, payment_api["country"],
-                    _client_ip(request))
-    fresh = await db.country_payment_apis.find_one({"_id": payment_api["_id"]})
-    return {"payment_api": _payment_api_public(fresh)}
-
-
-@api.delete("/admin/payment-apis/{payment_api_id}")
-async def delete_country_payment_api(payment_api_id: str, request: Request,
-                                     user: dict = Depends(require_module("settings"))):
-    payment_api = await db.country_payment_apis.find_one_and_delete({"id": payment_api_id})
-    if not payment_api:
-        raise HTTPException(status_code=404, detail="API de paiement introuvable")
-    await audit_log(user, "DELETE_COUNTRY_PAYMENT_API", "payment_api", payment_api_id, payment_api["country"], None,
-                    _client_ip(request))
-    return {"message": "API de paiement supprimée"}
-
-
-# ---------------- Countries Management ----------------
-@api.get("/admin/countries")
-async def list_all_countries(user: dict = Depends(require_module("settings"))):
-    countries = await db.countries.find({}).sort("name", 1).to_list(200)
-    result = [{"name": c["name"], "iso2": c["iso2"], "currency": c["currency"], "active": c.get("active", True),
-               "created_at": c.get("created_at")} for c in countries]
-    return {"countries": result}
-
-
-@api.put("/admin/countries/{country_name}/toggle")
-async def toggle_country_activation(country_name: str, req: CountryToggleReq, request: Request,
-                                    user: dict = Depends(require_module("settings"))):
-    country_name = country_name.strip()
-    country = await db.countries.find_one({"name": country_name})
-    if not country:
-        raise HTTPException(status_code=404, detail="Pays introuvable")
-    old_active = country.get("active", True)
-    await db.countries.update_one({"name": country_name}, {"$set": {"active": req.active, "updated_at": now_iso()}})
-    if not req.active:
-        await db.shops.update_many({"country": country_name, "status": {"$ne": "REJECTED"}},
-                                   {"$set": {"status": "DRAFT", "updated_at": now_iso()}})
-    await audit_log(user, "TOGGLE_COUNTRY", "country", country_name, old_active, req.active, _client_ip(request))
-    return {"message": f"Pays {country_name} {'activé' if req.active else 'désactivé'}", "active": req.active}
-
-
-# ---------------- Categories & Subcategories ----------------
-@api.get("/admin/categories")
-async def list_categories(user: dict = Depends(require_module("settings"))):
-    categories = await db.categories.find({}).sort("created_at", 1).to_list(500)
-    out = []
-    for cat in categories:
-        subcats = await db.subcategories.find({"category_id": cat["id"]}).sort("created_at", 1).to_list(100)
-        out.append({
-            "id": cat["id"], "name": cat["name"], "description": cat.get("description", ""),
-            "created_at": cat["created_at"], "subcategories": [serialize(s) for s in subcats]
-        })
-    return {"categories": out}
-
-
-@api.post("/admin/categories")
-async def create_category(req: CategoryReq, request: Request, user: dict = Depends(require_module("settings"))):
-    if not (req.name or "").strip():
-        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
-    cat = {
-        "id": new_id(), "name": req.name.strip(), "description": (req.description or "").strip(),
-        "created_at": now_iso(), "updated_at": now_iso()
-    }
-    await db.categories.insert_one(cat)
-    await audit_log(user, "CREATE_CATEGORY", "category", cat["id"], None, cat["name"], _client_ip(request))
-    return {"message": "Catégorie créée", "category": serialize(cat)}
-
-
-@api.put("/admin/categories/{category_id}")
-async def update_category(category_id: str, req: CategoryReq, request: Request,
-                         user: dict = Depends(require_module("settings"))):
-    if not (req.name or "").strip():
-        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
-    cat = await db.categories.find_one({"id": category_id})
-    if not cat:
-        raise HTTPException(status_code=404, detail="Catégorie introuvable")
-    upd = {"name": req.name.strip(), "description": (req.description or "").strip(), "updated_at": now_iso()}
-    await db.categories.update_one({"id": category_id}, {"$set": upd})
-    await audit_log(user, "UPDATE_CATEGORY", "category", category_id, cat["name"], upd["name"], _client_ip(request))
-    return {"message": "Catégorie mise à jour", "category": {**cat, **upd}}
-
-
-@api.delete("/admin/categories/{category_id}")
-async def delete_category(category_id: str, request: Request, user: dict = Depends(require_module("settings"))):
-    cat = await db.categories.find_one({"id": category_id})
-    if not cat:
-        raise HTTPException(status_code=404, detail="Catégorie introuvable")
-    subcat_count = await db.subcategories.count_documents({"category_id": category_id})
-    if subcat_count > 0:
-        raise HTTPException(status_code=400, detail=f"Impossible de supprimer : {subcat_count} sous-catégorie(s) trouvée(s). Supprimez-les d'abord.")
-    await db.categories.delete_one({"id": category_id})
-    await audit_log(user, "DELETE_CATEGORY", "category", category_id, cat["name"], None, _client_ip(request))
-    return {"message": "Catégorie supprimée"}
-
-
-@api.post("/admin/subcategories")
-async def create_subcategory(req: SubcategoryReq, request: Request, user: dict = Depends(require_module("settings"))):
-    if not (req.name or "").strip():
-        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
-    cat = await db.categories.find_one({"id": req.category_id})
-    if not cat:
-        raise HTTPException(status_code=404, detail="Catégorie introuvable")
-    subcat = {
-        "id": new_id(), "category_id": req.category_id, "name": req.name.strip(),
-        "description": (req.description or "").strip(), "created_at": now_iso(), "updated_at": now_iso()
-    }
-    await db.subcategories.insert_one(subcat)
-    await audit_log(user, "CREATE_SUBCATEGORY", "subcategory", subcat["id"], None, subcat["name"], _client_ip(request))
-    return {"message": "Sous-catégorie créée", "subcategory": serialize(subcat)}
-
-
-@api.put("/admin/subcategories/{subcategory_id}")
-async def update_subcategory(subcategory_id: str, req: SubcategoryReq, request: Request,
-                            user: dict = Depends(require_module("settings"))):
-    if not (req.name or "").strip():
-        raise HTTPException(status_code=400, detail="Le nom est obligatoire")
-    subcat = await db.subcategories.find_one({"id": subcategory_id})
-    if not subcat:
-        raise HTTPException(status_code=404, detail="Sous-catégorie introuvable")
-    cat = await db.categories.find_one({"id": req.category_id})
-    if not cat:
-        raise HTTPException(status_code=404, detail="Catégorie introuvable")
-    upd = {"category_id": req.category_id, "name": req.name.strip(),
-           "description": (req.description or "").strip(), "updated_at": now_iso()}
-    await db.subcategories.update_one({"id": subcategory_id}, {"$set": upd})
-    await audit_log(user, "UPDATE_SUBCATEGORY", "subcategory", subcategory_id, subcat["name"], upd["name"], _client_ip(request))
-    return {"message": "Sous-catégorie mise à jour", "subcategory": {**subcat, **upd}}
-
-
-@api.delete("/admin/subcategories/{subcategory_id}")
-async def delete_subcategory(subcategory_id: str, request: Request, user: dict = Depends(require_module("settings"))):
-    subcat = await db.subcategories.find_one({"id": subcategory_id})
-    if not subcat:
-        raise HTTPException(status_code=404, detail="Sous-catégorie introuvable")
-    await db.subcategories.delete_one({"id": subcategory_id})
-    await audit_log(user, "DELETE_SUBCATEGORY", "subcategory", subcategory_id, subcat["name"], None, _client_ip(request))
-    return {"message": "Sous-catégorie supprimée"}
 
 
 # ---------------- Legal content (Module 7) ----------------
@@ -1111,8 +770,8 @@ async def admin_validate_earning(tx_id: str, request: Request, user: dict = Depe
         {"id": tx_id}, {"$set": {"status": "AVAILABLE", "kind": "AVAILABLE",
                                  "validated_by": user["id"], "validated_at": now_iso()}})
     await audit_log(user, "VALIDATE_EARNING", "wallet_tx", tx_id, tx["status"], "AVAILABLE", _client_ip(request))
-    await notify(tx["user_id"], "EARNING_VALIDATED", "Gain validé",
-                 f"Votre gain de {tx['amount']} {tx['currency']} a été validé et est désormais disponible.", "/account/wallet")
+    await send_message(tx["user_id"], "client_earnings_validated", {"amount": _m(tx["amount"], tx["currency"])},
+                       "/account/wallet", "EARNING_VALIDATED")
     return {"message": "Gain validé et rendu disponible"}
 
 
@@ -1127,9 +786,75 @@ async def admin_reject_earning(tx_id: str, request: Request, user: dict = Depend
         {"id": tx_id}, {"$set": {"status": "REJECTED", "kind": "REJECTED",
                                  "validated_by": user["id"], "validated_at": now_iso()}})
     await audit_log(user, "REJECT_EARNING", "wallet_tx", tx_id, tx["status"], "REJECTED", _client_ip(request))
-    await notify(tx["user_id"], "EARNING_REJECTED", "Gain rejeté",
-                 f"Votre gain de {tx['amount']} {tx['currency']} a été rejeté après vérification.", "/account/wallet")
+    await send_message(tx["user_id"], "client_earnings_rejected", {"amount": _m(tx["amount"], tx["currency"]),
+                       "reason": "vérification administrative"}, "/account/wallet", "EARNING_REJECTED")
     return {"message": "Gain rejeté"}
+
+
+# ---------------- FX rates & customs ----------------
+@api.get("/fx/rates")
+async def fx_rates():
+    try:
+        return await fx.get_rates()
+    except Exception:
+        raise HTTPException(status_code=503, detail="Taux de change indisponibles")
+
+
+@api.post("/admin/fx/refresh")
+async def fx_refresh(user: dict = Depends(require_module("settings"))):
+    try:
+        d = await fx.get_rates(force=True)
+    except Exception:
+        raise HTTPException(status_code=503, detail="API de taux de change injoignable")
+    return {"updated_at": d["updated_at"], "source": d["source"], "count": len(d["rates"])}
+
+
+@api.get("/admin/customs")
+async def admin_list_customs(user: dict = Depends(require_module("settings"))):
+    rows = await db.customs_rules.find({}, {"_id": 0}).sort("country", 1).to_list(500)
+    return {"rules": rows}
+
+
+@api.post("/admin/customs")
+async def admin_create_customs(req: CustomsRuleReq, request: Request, user: dict = Depends(require_module("settings"))):
+    if not req.country or req.rate_percent is None:
+        raise HTTPException(status_code=400, detail="Pays et taux requis")
+    if req.country not in {c["name"] for c in COUNTRIES}:
+        raise HTTPException(status_code=400, detail="Pays inconnu")
+    if not 0 <= req.rate_percent <= 100:
+        raise HTTPException(status_code=400, detail="Le taux doit être entre 0 et 100 %")
+    if await db.customs_rules.find_one({"country": req.country}):
+        raise HTTPException(status_code=400, detail="Une règle existe déjà pour ce pays")
+    doc = {"id": new_id(), "country": req.country, "rate_percent": round(min(100.0, max(0.0, req.rate_percent)), 2),
+           "enabled": True if req.enabled is None else bool(req.enabled), "created_at": now_iso()}
+    await db.customs_rules.insert_one(dict(doc))
+    await audit_log(user, "CREATE_CUSTOMS", "customs", doc["id"], None, f"{doc['country']} {doc['rate_percent']}%", _client_ip(request))
+    return {"rule": doc}
+
+
+@api.put("/admin/customs/{rid}")
+async def admin_update_customs(rid: str, req: CustomsRuleReq, request: Request, user: dict = Depends(require_module("settings"))):
+    upd = {}
+    if req.rate_percent is not None:
+        if not 0 <= req.rate_percent <= 100:
+            raise HTTPException(status_code=400, detail="Le taux doit être entre 0 et 100 %")
+        upd["rate_percent"] = round(req.rate_percent, 2)
+    if req.enabled is not None:
+        upd["enabled"] = bool(req.enabled)
+    res = await db.customs_rules.update_one({"id": rid}, {"$set": upd}) if upd else None
+    if res is not None and res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Règle introuvable")
+    await audit_log(user, "UPDATE_CUSTOMS", "customs", rid, None, upd, _client_ip(request))
+    return {"rule": await db.customs_rules.find_one({"id": rid}, {"_id": 0})}
+
+
+@api.delete("/admin/customs/{rid}")
+async def admin_delete_customs(rid: str, request: Request, user: dict = Depends(require_module("settings"))):
+    res = await db.customs_rules.delete_one({"id": rid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Règle introuvable")
+    await audit_log(user, "DELETE_CUSTOMS", "customs", rid, None, None, _client_ip(request))
+    return {"message": "Règle supprimée"}
 
 
 # ---------------- Taxes per country/zone (Module 7) ----------------
@@ -1239,6 +964,8 @@ async def create_shop(req: ShopReq, user: dict = Depends(require_roles("MERCHANT
         "status": "DRAFT",
         "rejection_reason": "",
         "coefficients": {"partner": 0.5, "professional": 0.5, "enterprise": 0.5},
+        "payment_provider": "MONITY_WORLD",
+        "payment_config": {},
         "created_at": now_iso(),
         "is_demo": False,
     }
@@ -1297,89 +1024,30 @@ async def update_coefficients(shop_id: str, req: CoefficientsReq, user: dict = D
 
 def _public_shop(shop: dict) -> dict:
     s = serialize(shop)
-    for k in ("coefficients", "rejection_reason", "tax_number",
+    for k in ("coefficients", "rejection_reason", "tax_number", "payment_config",
               "commission_rate", "product_quota", "storage_quota_mb", "suspension_reason"):
         s.pop(k, None)
     return s
 
 
-def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance in km between two lat/lon coordinates."""
-    if not (lat1 and lon1 and lat2 and lon2):
-        return float('inf')
-    from math import radians, cos, sin, asin, sqrt
-    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-    dlon = lon2 - lon1
-    dlat = lat2 - lat1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    c = 2 * asin(sqrt(a))
-    return c * 6371
-
-
-@api.post("/location/set")
-async def set_user_location(req: UserLocationReq, user: dict = Depends(get_current_user)):
-    await db.users.update_one({"_id": ObjectId(user["id"])},
-                              {"$set": {"location": req.model_dump(), "updated_at": now_iso()}})
-    return {"message": "Localisation mise à jour"}
-
-
-@api.get("/location/detect")
-async def detect_location(request: Request):
-    """Detect user location from IP and return country/city suggestion."""
-    ip = _client_ip(request)
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["curl", "-s", f"https://ipapi.co/{ip}/json/"],
-            capture_output=True, text=True, timeout=2
-        )
-        if result.returncode == 0:
-            import json
-            data = json.loads(result.stdout)
-            country = data.get("country_name", "")
-            city = data.get("city", "")
-            lat = data.get("latitude")
-            lon = data.get("longitude")
-            return {"country": country, "city": city, "latitude": lat, "longitude": lon}
-    except Exception:
-        pass
-    return {"country": "", "city": "", "latitude": None, "longitude": None}
-
-
 @api.get("/shops")
-async def list_shops(q: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None,
-                     user: Optional[dict] = Depends(lambda: None)):
-    """List shops, optionally sorted by proximity to user location."""
-    active_countries = await db.countries.find({"active": True}).to_list(200)
-    active_country_names = {c["name"] for c in active_countries}
-    query = {"status": "APPROVED", "suspended": {"$ne": True}, "country": {"$in": list(active_country_names)}}
+async def list_shops(q: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None):
+    query = {"status": "APPROVED", "suspended": {"$ne": True}}
     if q:
         query["name"] = {"$regex": q, "$options": "i"}
+    query["country"] = {"$nin": list(await payapis.disabled_countries())}
     if country:
-        if country not in active_country_names:
-            return {"shops": []}
-        query["country"] = country
+        query["country"] = {"$eq": country, **query["country"]}
     if city:
         query["city"] = {"$regex": city, "$options": "i"}
     shops = await db.shops.find(query).to_list(200)
-    result = [_public_shop(s) for s in shops]
-    if user and user.get("location"):
-        user_loc = user["location"]
-        user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
-        if user_lat and user_lon:
-            for shop in result:
-                shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
-                shop["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
-            result.sort(key=lambda x: (x.get("country") != user_loc.get("country"),
-                                       x.get("city") != user_loc.get("city"),
-                                       x.get("distance_km", float('inf'))))
-    return {"shops": result}
+    return {"shops": [_public_shop(s) for s in shops]}
 
 
 @api.get("/shops/{shop_id}")
 async def get_shop(shop_id: str):
     shop = await _shop_or_404(shop_id)
-    if shop.get("suspended") or shop.get("status") != "APPROVED":
+    if shop.get("suspended") or shop.get("status") != "APPROVED" or shop.get("country") in await payapis.disabled_countries():
         raise HTTPException(status_code=404, detail="Boutique indisponible")
     return {"shop": _public_shop(shop)}
 
@@ -1443,6 +1111,7 @@ async def create_product(req: ProductReq, user: dict = Depends(require_roles("ME
         count = await db.products.count_documents({"shop_id": shop["id"], "status": {"$ne": "DELETED"}})
         if count >= quota:
             raise HTTPException(status_code=403, detail=f"Quota de produits atteint ({quota}). Contactez l'administrateur.")
+    await categories.check_pair(req.category, req.subcategory)
     storage_quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
     if storage_quota_mb > 0:
         used = await _shop_storage_bytes(shop["id"])
@@ -1493,6 +1162,7 @@ async def update_product(product_id: str, req: ProductReq, user: dict = Depends(
     product = await db.products.find_one({"id": product_id})
     if not product or not shop or product["shop_id"] != shop["id"]:
         raise HTTPException(status_code=403, detail="Accès refusé")
+    await categories.check_pair(req.category, req.subcategory)
     settings = await get_settings()
     storage_quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
     if storage_quota_mb > 0:
@@ -1609,7 +1279,8 @@ async def list_products(request: Request, q: Optional[str] = None, category: Opt
     if shop_id:
         query["shop_id"] = shop_id
     products = await db.products.find(query).to_list(300)
-    susp = {s["id"] async for s in db.shops.find({"suspended": True}, {"id": 1})}
+    off = list(await payapis.disabled_countries())
+    susp = {s["id"] async for s in db.shops.find({"$or": [{"suspended": True}, {"country": {"$in": off}}]}, {"id": 1})}
     products = [p for p in products if p.get("shop_id") not in susp]
     user = await _optional_user(request)
     cache = {}
@@ -1635,22 +1306,7 @@ async def list_products(request: Request, q: Optional[str] = None, category: Opt
             continue
         if max_price is not None and item["display_price"] > max_price:
             continue
-        if user and user.get("location"):
-            shop = shop_cache.get(p["shop_id"]) or await db.shops.find_one({"id": p["shop_id"]})
-            if shop:
-                shop_cache[p["shop_id"]] = shop
-                shop_lat, shop_lon = shop.get("latitude"), shop.get("longitude")
-                user_loc = user["location"]
-                user_lat, user_lon = user_loc.get("latitude"), user_loc.get("longitude")
-                if user_lat and user_lon and shop_lat and shop_lon:
-                    item["distance_km"] = _haversine_distance(user_lat, user_lon, shop_lat, shop_lon)
-                    item["same_country"] = shop.get("country") == user_loc.get("country")
-                    item["same_city"] = shop.get("city") == user_loc.get("city")
         result.append(item)
-    if user and user.get("location"):
-        result.sort(key=lambda x: (not x.get("same_country", False),
-                                    not x.get("same_city", False),
-                                    x.get("distance_km", float('inf'))))
     return {"products": result}
 
 
@@ -1662,7 +1318,7 @@ async def get_product(product_id: str, request: Request, for_client: bool = Fals
     if product.get("moderation_status", "APPROVED") != "APPROVED":
         raise HTTPException(status_code=404, detail="Article indisponible")
     shop_doc = await db.shops.find_one({"id": product["shop_id"]})
-    if shop_doc and shop_doc.get("suspended"):
+    if shop_doc and (shop_doc.get("suspended") or shop_doc.get("country") in await payapis.disabled_countries()):
         raise HTTPException(status_code=404, detail="Article indisponible")
     await db.products.update_one({"id": product_id}, {"$inc": {"views": 1}})
     user = await _optional_user(request)
@@ -1678,28 +1334,6 @@ async def get_product(product_id: str, request: Request, for_client: bool = Fals
         return {"product": item}
     ctype = await viewer_ctype(product["shop_id"], user, cache)
     return {"product": _public_product(product, ctype)}
-
-
-# ---------------- Categories ----------------
-@api.get("/categories")
-async def list_categories():
-    cats = await db.categories.find({"status": "APPROVED"}).to_list(200)
-    return {"categories": [serialize(c) for c in cats]}
-
-
-@api.post("/categories")
-async def create_category(payload: dict, user: dict = Depends(get_current_user)):
-    name = (payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Nom requis")
-    existing = await db.categories.find_one({"name": {"$regex": f"^{name}$", "$options": "i"}})
-    if existing:
-        return {"category": serialize(existing)}
-    status = "APPROVED" if user["role"] in ("SUPER_ADMIN", "ADMIN") else "PENDING"
-    doc = {"id": new_id(), "name": name, "parent": payload.get("parent"),
-           "proposed_by": user["id"], "status": status, "created_at": now_iso()}
-    await db.categories.insert_one(doc)
-    return {"category": serialize(doc)}
 
 
 # ---------------- Uploads & file serving (P1) ----------------
@@ -1812,7 +1446,7 @@ async def import_products(file: UploadFile = File(...), user: dict = Depends(req
                 "currency": shop["currency"], "currency_symbol": shop.get("currency_symbol", ""),
                 "name": name, "short_description": str(row.get("short_description") or ""),
                 "description": str(row.get("description") or ""), "image": str(row.get("image") or ""),
-                "gallery": [], "category": str(row.get("category") or ""), "subcategory": "", "genre": "", "usage": "",
+                "gallery": [], "category": str(row.get("category") or "") if await categories.valid_pair(str(row.get("category") or ""), "") else "", "subcategory": "", "genre": "", "usage": "",
                 "attributes": {}, "weight": 0, "dimensions": "", "sku": str(row.get("sku") or "") or gen_sku(),
                 "stock": stock, "alert_threshold": int(num(row.get("alert_threshold"), 5)),
                 "price_simple": num(row.get("price_simple")), "price_partner": num(row.get("price_partner")),
@@ -1853,8 +1487,92 @@ async def _restore_stock(oi):
                                      {"$inc": {"stock": oi["qty"], "sold": -oi["qty"]}})
 
 
+async def _logistics(shop: dict, entries: list, subtotal: float, user: dict, settings: dict) -> dict:
+    """Transport (shop currency), customs (buyer currency) and FX for one shop's part of a cart."""
+    bcur = fx.buyer_currency(user) or shop["currency"]
+    r = await fx.rate(shop["currency"], bcur)
+    dest = user.get("country") or ""
+    intl = bool(dest and shop.get("country") and dest != shop["country"])
+    dw = float(settings.get("intl_default_weight_kg") or 0)
+    weight = sum((float(p.get("weight") or 0) or dw) * q for p, q, _ in entries)
+    km = fx.distance_km(shop["country"], dest) if intl else 0.0
+    if intl:
+        ref = (float(settings.get("intl_shipping_base") or 0) + float(settings.get("intl_shipping_per_kg") or 0) * weight
+               + float(settings.get("intl_shipping_per_km") or 0) * km)
+        shipping = ref * await fx.rate(settings.get("intl_shipping_currency") or "USD", shop["currency"])
+    else:
+        shipping = sum(float(p.get("shipping_fee", 0)) * q for p, q, _ in entries)
+    customs_rate = 0.0
+    if intl and settings.get("customs_enabled", True):
+        rule = await db.customs_rules.find_one({"country": dest, "enabled": True})
+        customs_rate = float(rule["rate_percent"]) if rule else 0.0
+    rates = await fx.get_rates()
+    return {"buyer_currency": bcur, "fx_rate": round(r, 8), "fx_updated_at": rates.get("updated_at"),
+            "international": intl, "destination_country": dest, "distance_km": km, "weight_kg": round(weight, 3),
+            "shipping": round(shipping, 2), "customs_rate": customs_rate,
+            "customs_fee": round(subtotal * r * customs_rate / 100, 2)}
+
+
+@api.post("/orders/quote")
+async def checkout_quote(req: CheckoutReq, user: dict = Depends(get_current_user)):
+    _deny_partner(user)
+    await payapis.ensure_country_enabled(user)
+    off = await payapis.disabled_countries()
+    settings = await get_settings()
+    is_private = bool(req.private_client and (req.private_client.get("name") or "").strip())
+    by_shop = {}
+    for it in req.items:
+        product = await db.products.find_one({"id": it.product_id, "status": "ACTIVE", "moderation_status": "APPROVED"})
+        if not product or it.qty < 1:
+            raise HTTPException(status_code=400, detail="Article indisponible")
+        by_shop.setdefault(product["shop_id"], []).append((product, it.qty, it.variant_id))
+    quotes = []
+    for shop_id, entries in by_shop.items():
+        shop = await db.shops.find_one({"id": shop_id})
+        if not shop or shop.get("country") in off:
+            raise HTTPException(status_code=400, detail="Boutique indisponible")
+        ctype = await get_customer_type(shop_id, user["id"])
+        if ctype == "SIMPLE" and user.get("is_partner"):
+            ctype = "PARTENAIRE"
+        subtotal = 0.0
+        for product, qty, variant_id in entries:
+            eff = product
+            variant = next((v for v in (product.get("variants") or []) if v.get("id") == variant_id), None)
+            if variant:
+                eff = {**product, **{pk: float(variant.get(pk, product.get(pk, 0)))
+                                     for pk in ("price_simple", "price_partner", "price_pro", "price_enterprise")}}
+            if is_private:
+                subtotal += compute_margin(eff, shop, "PARTENAIRE" if ctype == "SIMPLE" else ctype, qty)["line_total"]
+            else:
+                subtotal += compute_line(eff, shop, ctype, qty)["line_total"]
+        try:
+            lg = await _logistics(shop, entries, subtotal, user, settings)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Service de conversion des devises indisponible, réessayez")
+        r = lg["fx_rate"]
+        b_sub, b_ship = round(subtotal * r, 2), round(lg["shipping"] * r, 2)
+        quotes.append({**lg, "shop_id": shop_id, "shop_name": shop["name"], "shop_country": shop.get("country", ""),
+                       "shop_currency": shop["currency"], "subtotal_shop": round(subtotal, 2),
+                       "subtotal": b_sub, "shipping_buyer": b_ship,
+                       "total_without_customs": round(b_sub + b_ship, 2),
+                       "total_with_customs": round(b_sub + b_ship + lg["customs_fee"], 2)})
+    bcur = quotes[0]["buyer_currency"] if quotes else (fx.buyer_currency(user) or "")
+    return {"buyer_currency": bcur, "shops": quotes,
+            "subtotal": round(sum(q["subtotal"] for q in quotes), 2),
+            "shipping": round(sum(q["shipping_buyer"] for q in quotes), 2),
+            "customs": round(sum(q["customs_fee"] for q in quotes), 2),
+            "total_without_customs": round(sum(q["total_without_customs"] for q in quotes), 2),
+            "total_with_customs": round(sum(q["total_with_customs"] for q in quotes), 2)}
+
+
+def _deny_partner(user: dict):
+    if user.get("role") in logistics.PARTNER_ROLES:
+        raise HTTPException(status_code=403, detail="Les comptes points relais et transporteurs n'ont pas accès à la marketplace")
+
+
 @api.post("/orders")
 async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
+    _deny_partner(user)
     if not req.items:
         raise HTTPException(status_code=400, detail="Panier vide")
 
@@ -1879,16 +1597,20 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
 
     wallet_budget = 0.0
     if req.use_wallet:
-        bal = await wallet_balances(user["id"])
+        bal = await wallet_balances(user["id"], fx.buyer_currency(user) or None)
         wallet_budget = bal["total_available"]
         if req.wallet_amount is not None:
             wallet_budget = min(wallet_budget, max(0.0, float(req.wallet_amount)))
 
+    await payapis.ensure_country_enabled(user)
+    off = await payapis.disabled_countries()
+    pay_api = await payapis.resolve_api(user, "PAYMENT", req.payment_api_id)
     settings = await get_settings()
+    customs_mode = req.customs_payment if req.customs_payment in ("NOW", "ON_DELIVERY") else "NOW"
 
     for shop_id, entries in shops_items.items():
         shop = await db.shops.find_one({"id": shop_id})
-        if not shop or shop.get("suspended") or shop.get("status") != "APPROVED":
+        if not shop or shop.get("suspended") or shop.get("status") != "APPROVED" or shop.get("country") in off:
             raise HTTPException(status_code=400, detail="Boutique indisponible")
         buyer_type = await get_customer_type(shop_id, user["id"])
         if buyer_type == "SIMPLE":
@@ -1971,45 +1693,41 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
 
         commission = round(commission_accum, 2)
         effective_comm_rate = round(commission / total, 4) if total > 0 else 0.0
-        shipping = sum(float(p.get("shipping_fee", 0)) * q for p, q, _ in entries)
+        try:
+            lg = await _logistics(shop, entries, total, user, settings)
+        except Exception:
+            for oi in order_items:
+                await _restore_stock(oi)
+            raise HTTPException(status_code=503, detail="Service de conversion des devises indisponible, réessayez")
+        shipping = lg["shipping"]
         grand_total = round(total + shipping, 2)
+        r = lg["fx_rate"]
+        bcur = lg["buyer_currency"]
+        b_sub, b_ship, customs = round(total * r, 2), round(shipping * r, 2), lg["customs_fee"]
+        customs_now = customs if (customs > 0 and customs_mode == "NOW") else 0.0
+        payable = round(b_sub + b_ship + customs_now, 2)
         wallet_applied = 0.0
         if wallet_budget > 0:
-            wallet_applied = round(min(wallet_budget, grand_total), 2)
+            wallet_applied = round(min(wallet_budget, payable), 2)
             wallet_budget = round(wallet_budget - wallet_applied, 2)
-        provider_amount = round(grand_total - wallet_applied, 2)
-        
-        # Priority: 1. Personal merchant API (if enabled), 2. Country-level API, 3. Fallback
-        payment_api = None
-        payment_api_id = None
-        provider = "MONITY_WORLD"
-        
-        # Check if personal merchant API is enabled for this shop
-        if shop.get("allow_personal_api"):
-            # In future: shops can have personal_payment_provider, personal_payment_api_key stored
-            # For now, personal API support requires merchant configuration endpoint
-            pass
-        
-        # If no personal API, use country-level API
-        if not payment_api:
-            payment_api = await db.country_payment_apis.find_one(
-                {"country": shop["country"], "active": True},
-                sort=[("created_at", 1)],
-            )
-            if payment_api:
-                payment_api_id = payment_api["id"]
-                provider = payment_api["provider"]
-        
-        payment = await process_payment(provider, provider_amount, shop["currency"])
+        provider_amount = round(payable - wallet_applied, 2)
+        provider = pay_api["provider"] or pay_api["name"] if pay_api else shop.get("payment_provider") or "MONITY_WORLD"
+        payment = await process_payment(provider, provider_amount, bcur)
         order = {
             "id": new_id(), "ref": gen_order_ref(), "tracking_number": gen_tracking(),
             "customer_id": user["id"], "customer_name": user["name"], "customer_type": ctype,
             "reseller_type": reseller_type, "shop_id": shop_id, "shop_name": shop["name"],
             "items": order_items, "subtotal": round(total, 2), "shipping": round(shipping, 2),
             "total": grand_total, "currency": shop["currency"], "currency_symbol": shop.get("currency_symbol", ""),
-            "status": "NOUVELLE", "payment_method": req.payment_method, "payment_provider": provider,
-            "payment_status": payment["status"], "payment_api_id": payment_api_id,
-            "wallet_paid": wallet_applied, "provider_paid": provider_amount,
+            "status": "NOUVELLE", "payment_method": req.payment_method, "payment_provider": provider, "payment_api": pay_api,
+            "payment_status": payment["status"], "wallet_paid": wallet_applied, "provider_paid": provider_amount,
+            "buyer_currency": bcur, "fx_rate": r, "fx_updated_at": lg["fx_updated_at"],
+            "buyer_subtotal": b_sub, "buyer_shipping": b_ship, "buyer_total": round(b_sub + b_ship + customs, 2),
+            "international": lg["international"], "distance_km": lg["distance_km"], "weight_kg": lg["weight_kg"],
+            "destination_country": lg["destination_country"], "customs_rate": lg["customs_rate"],
+            "customs_fee": customs, "customs_payment": customs_mode if customs > 0 else None,
+            "customs_status": ("PAID" if customs_mode == "NOW" else "DUE_ON_DELIVERY") if customs > 0 else None,
+            "amount_paid_now": payable, "amount_due_on_delivery": round(customs - customs_now, 2),
             "address": req.address, "bonus_total": round(total_bonus, 2), "margin_total": round(total_margin, 2),
             "commission": commission, "commission_rate": effective_comm_rate,
             "is_private": is_private, "private_client": private_info,
@@ -2021,7 +1739,7 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
         order_refs.append(order["ref"])
 
         if wallet_applied > 0:
-            await add_wallet_tx(user["id"], "general", wallet_applied, shop["currency"], "WITHDRAWAL",
+            await add_wallet_tx(user["id"], "general", wallet_applied, bcur, "WITHDRAWAL",
                                 "WITHDRAWN", f"Paiement commande {order['ref']} avec le solde", shop_id, order["id"])
 
         await db.shop_customers.update_one(
@@ -2037,18 +1755,31 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
             if buyer_type == "SIMPLE":
                 await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"is_partner": True}})
             for wallet, amt in margin_accum.items():
-                await add_wallet_tx(user["id"], wallet, amt, shop["currency"], "PENDING", "PENDING",
+                await add_wallet_tx(user["id"], wallet, round(amt * r, 2), bcur, "PENDING", "PENDING",
                                     f"Marge revendeur commande {order['ref']}", shop_id, order["id"])
         else:
             if total_bonus > 0:
-                await add_wallet_tx(user["id"], "bonus_promo", total_bonus, shop["currency"], "PENDING",
+                await add_wallet_tx(user["id"], "bonus_promo", round(total_bonus * r, 2), bcur, "PENDING",
                                     "PENDING", f"Bonus promotionnel commande {order['ref']}", shop_id, order["id"])
             for wallet, amt in recette_accum.items():
-                await add_wallet_tx(user["id"], wallet, amt, shop["currency"], "PENDING", "PENDING",
+                await add_wallet_tx(user["id"], wallet, round(amt * r, 2), bcur, "PENDING", "PENDING",
                                     f"Recette commande {order['ref']}", shop_id, order["id"])
 
-        await notify(shop["owner_id"], "NEW_ORDER", "Nouvelle commande",
-                     f"Commande {order['ref']} reçue ({grand_total} {shop['currency']}).")
+        await send_message(shop["owner_id"], "merchant_new_order", {"ref": order["ref"], "total": _m(grand_total, shop["currency"]),
+                           "customer": order.get("customer_name", "")}, "/merchant/orders", "NEW_ORDER")
+        if str(payment.get("status", "")).startswith("PAID"):
+            await send_message(shop["owner_id"], "merchant_payment_received", {"ref": order["ref"], "amount": _m(grand_total, shop["currency"])},
+                               "/merchant/orders", "PAYMENT")
+        await send_message(user["id"], "client_order_confirmed", {"ref": order["ref"], "total": _m(payable, bcur)},
+                           "/account/orders", "ORDER_UPDATE")
+        if customs > 0 and customs_mode == "ON_DELIVERY":
+            await send_message(user["id"], "client_customs_due", {"ref": order["ref"], "amount": _m(customs, bcur)},
+                               "/account/orders", "ORDER_UPDATE")
+        for p, _q, _v in entries:
+            fresh = await db.products.find_one({"id": p["id"]}, {"stock": 1, "name": 1})
+            if fresh and int(fresh.get("stock", 0)) <= LOW_STOCK:
+                await send_message(shop["owner_id"], "merchant_low_stock", {"product": fresh["name"], "stock": fresh.get("stock", 0)},
+                                   "/merchant/products", "STOCK")
 
     return {"message": "Commande passée avec succès", "orders": order_refs}
 
@@ -2109,6 +1840,10 @@ async def update_order_status(order_id: str, req: OrderStatusReq, user: dict = D
     if new_status not in ALLOWED_TRANSITIONS.get(order["status"], []):
         raise HTTPException(status_code=400, detail=f"Transition non autorisée: {order['status']} -> {new_status}")
 
+    if new_status in ("ANNULEE", "REJETEE"):
+        res = await _cancel_order(order, user, new_status)
+        return {"message": res["message"], "status": new_status, "refund": res["refund"]}
+
     await db.orders.update_one({"id": order_id}, {
         "$set": {"status": new_status},
         "$push": {"status_history": {"status": new_status, "at": now_iso(), "by": user["id"]}},
@@ -2125,25 +1860,97 @@ async def update_order_status(order_id: str, req: OrderStatusReq, user: dict = D
         expected = (shipped + timedelta(days=delay)).isoformat()
         await db.orders.update_one({"id": order_id}, {"$set": {"shipped_at": shipped.isoformat(), "expected_delivery": expected}})
 
-    if new_status in ("ANNULEE", "REJETEE"):
-        for it in order["items"]:
-            await db.products.update_one({"id": it["product_id"]},
-                                         {"$inc": {"stock": it["qty"], "sold": -it["qty"]}})
-        await db.wallet_transactions.delete_many(
-            {"order_id": order_id, "status": {"$in": ["PENDING", "AWAITING_VALIDATION"]}})
-
     if new_status == "LIVREE":
-        # Client earnings become validatable by an admin (they do NOT auto-become available).
-        pending = await db.wallet_transactions.find({"order_id": order_id, "status": "PENDING"}).to_list(100)
-        for tx in pending:
-            await db.wallet_transactions.update_one(
-                {"id": tx["id"]},
-                {"$set": {"status": "AWAITING_VALIDATION", "kind": "AWAITING_VALIDATION", "delivered_at": now_iso()}})
-        await _credit_seller_payout(order, shop)
+        await _apply_delivered(order, shop)
 
-    await notify(order["customer_id"], "ORDER_UPDATE", "Mise à jour commande",
-                 f"Commande {order['ref']} : {new_status}.")
+    key = STATUS_TEMPLATES.get(new_status)
+    if key:
+        await send_message(order["customer_id"], key, {"ref": order["ref"], "carrier": order.get("carrier_name") or "—",
+                           "tracking": order.get("tracking_number") or order["ref"]}, "/account/orders", "ORDER_UPDATE")
+    else:
+        await notify(order["customer_id"], "ORDER_UPDATE", "Mise à jour commande",
+                     f"Commande {order['ref']} : {new_status}.")
+    if order.get("carrier_id") and new_status in ("PRETE", "LIVREE"):
+        await send_to_users({"role": "CARRIER_AGENT", "carrier_id": order["carrier_id"], "status": "ACTIVE"},
+                            "carrier_parcel_ready" if new_status == "PRETE" else "carrier_parcel_delivered",
+                            {"ref": order["ref"], "shop": order.get("shop_name", ""), "address": (shop or {}).get("address", "")},
+                            "/partner", "PARCEL")
     return {"message": "Statut mis à jour", "status": new_status}
+
+
+STATUS_TEMPLATES = {"APPROUVEE": "client_order_approved", "EN_PREPARATION": "client_order_preparing",
+                    "PRETE": "client_order_ready", "EXPEDIEE": "client_order_shipped", "LIVREE": "client_order_delivered"}
+LOW_STOCK = 5
+
+
+async def _apply_delivered(order: dict, shop: dict):
+    order_id = order["id"]
+    if order.get("customs_status") == "DUE_ON_DELIVERY":
+        await db.orders.update_one({"id": order_id}, {"$set": {"customs_status": "PAID_ON_DELIVERY",
+                                                               "customs_paid_at": now_iso()}})
+    # Client earnings become validatable by an admin (they do NOT auto-become available).
+    pending = await db.wallet_transactions.find({"order_id": order_id, "status": "PENDING"}).to_list(100)
+    for tx in pending:
+        await db.wallet_transactions.update_one(
+            {"id": tx["id"]},
+            {"$set": {"status": "AWAITING_VALIDATION", "kind": "AWAITING_VALIDATION", "delivered_at": now_iso()}})
+    await _credit_seller_payout(order, shop)
+
+
+CANCELLABLE = ["NOUVELLE", "EN_ATTENTE", "APPROUVEE", "EN_PREPARATION", "PRETE"]
+
+
+async def _cancel_order(order: dict, actor: dict, new_status: str = "ANNULEE") -> dict:
+    """Cancel before shipment: restore stock, drop pending earnings, refund what was paid to the general wallet."""
+    claimed = await db.orders.find_one_and_update(
+        {"id": order["id"], "status": {"$in": CANCELLABLE}, "route_events.0": {"$exists": False}},
+        {"$set": {"status": new_status, "cancelled_at": now_iso(), "cancelled_by": actor["id"],
+                  "cancelled_by_role": actor.get("role")},
+         "$push": {"status_history": {"status": new_status, "at": now_iso(), "by": actor["id"]}}})
+    if not claimed:
+        raise HTTPException(status_code=400, detail="Commande déjà expédiée ou non annulable")
+    for it in claimed["items"]:
+        await _restore_stock(it)
+    await db.wallet_transactions.delete_many(
+        {"order_id": claimed["id"], "status": {"$in": ["PENDING", "AWAITING_VALIDATION"]}})
+    if "amount_paid_now" in claimed:
+        refund = float(claimed.get("amount_paid_now") or 0)
+    else:
+        refund = float(claimed.get("wallet_paid", 0) or 0) + float(claimed.get("provider_paid", 0) or 0)
+    cur = claimed.get("buyer_currency") or claimed.get("currency")
+    refund = round(refund, 2)
+    upd = {"refund_amount": refund, "refund_currency": cur, "refunded_at": now_iso() if refund > 0 else None}
+    if claimed.get("customs_status") == "PAID":
+        upd["customs_status"] = "REFUNDED"
+    elif claimed.get("customs_status") == "DUE_ON_DELIVERY":
+        upd["customs_status"] = "CANCELLED"
+    await db.orders.update_one({"id": claimed["id"]}, {"$set": upd})
+    if refund > 0:
+        await add_wallet_tx(claimed["customer_id"], "general", refund, cur, "REFUND", "AVAILABLE",
+                            f"Remboursement commande {claimed['ref']} (annulation)", claimed["shop_id"], claimed["id"],
+                            actor["id"])
+    await audit_log(actor, "ORDER_CANCEL", "order", claimed["id"], claimed["status"], f"{new_status} refund {refund} {cur}")
+    label = "annulée" if new_status == "ANNULEE" else "rejetée"
+    amount_txt = _m(refund, cur)
+    await send_message(claimed["customer_id"], "client_order_cancelled", {"ref": claimed["ref"], "refund": amount_txt},
+                       "/account/wallet", "ORDER_UPDATE")
+    shop = await db.shops.find_one({"id": claimed["shop_id"]})
+    if shop and shop.get("owner_id") != actor["id"]:
+        await send_message(shop["owner_id"], "merchant_order_cancelled", {"ref": claimed["ref"]}, "/merchant/orders", "ORDER_UPDATE")
+    who = "votre solde" if actor["id"] == claimed["customer_id"] else "le solde du client"
+    return {"message": f"Commande {label}" + (f", {amount_txt} remboursés sur {who}" if refund > 0 else ""),
+            "refund": refund, "currency": cur}
+
+
+@api.post("/orders/{order_id}/cancel")
+async def cancel_order(order_id: str, user: dict = Depends(get_current_user)):
+    order = await _order_or_404(order_id)
+    shop = await db.shops.find_one({"id": order["shop_id"]})
+    allowed = (user["id"] == order.get("customer_id") or (shop and shop.get("owner_id") == user["id"])
+               or (rbac.is_staff(user) and (user.get("role") == "SUPER_ADMIN" or "orders" in effective_permissions(user))))
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    return await _cancel_order(order, user)
 
 
 # ---------------- Module 4: Finance (payouts, invoices, accounting export) ----------------
@@ -2167,8 +1974,8 @@ async def _credit_seller_payout(order: dict, shop: dict):
         "commission": round(commission, 2), "net": net, "currency": order["currency"],
         "status": "AVAILABLE", "created_at": now_iso(),
     })
-    await notify(owner, "PAYOUT", "Reversement crédité",
-                 f"{net} {order['currency']} crédités pour la commande {order['ref']}.", "/merchant/finance")
+    await send_message(owner, "merchant_payout_credited", {"ref": order["ref"], "amount": _m(net, order["currency"])},
+                       "/merchant/finance", "PAYOUT")
 
 
 async def _order_or_404(order_id: str) -> dict:
@@ -2511,16 +2318,19 @@ async def set_customer_type(shop_id: str, user_id: str, req: CustomerTypeReq, us
 # ---------------- Wallet & Withdrawals ----------------
 @api.get("/wallet")
 async def get_wallet(user: dict = Depends(get_current_user)):
-    bal = await wallet_balances(user["id"])
+    bal = await wallet_balances(user["id"], fx.buyer_currency(user) or None)
     txs = await db.wallet_transactions.find({"user_id": user["id"]}).sort("created_at", -1).to_list(200)
     return {**bal, "transactions": [serialize(t) for t in txs]}
 
 
 @api.post("/withdrawals")
 async def request_withdrawal(req: WithdrawReq, user: dict = Depends(get_current_user)):
+    _deny_partner(user)
+    await payapis.ensure_country_enabled(user)
+    pay_api = await payapis.resolve_api(user, "WITHDRAWAL", req.payment_api_id)
     if req.amount <= 0:
         raise HTTPException(status_code=400, detail="Montant invalide")
-    bal = await wallet_balances(user["id"])
+    bal = await wallet_balances(user["id"], fx.buyer_currency(user) or None)
     if req.amount > bal["total_available"]:
         raise HTTPException(status_code=400, detail="Solde disponible insuffisant")
     dup = await db.withdrawal_requests.find_one({
@@ -2534,7 +2344,7 @@ async def request_withdrawal(req: WithdrawReq, user: dict = Depends(get_current_
         "amount": round(req.amount, 2), "currency": user.get("currency", ""),
         "method": req.method, "destination": req.destination,
         "bank_name": req.bank_name or "", "account_name": req.account_name or "",
-        "reference": "", "status": "DEMANDE", "debited": False, "created_at": now_iso(),
+        "reference": "", "status": "DEMANDE", "debited": False, "created_at": now_iso(), "payment_api": pay_api,
     }
     await db.withdrawal_requests.insert_one(doc)
     await audit_log(user, "WITHDRAW_REQUEST", "withdrawal", doc["id"], None, doc["amount"])
@@ -2680,8 +2490,8 @@ async def suspend_shop(shop_id: str, req: SuspendReq, request: Request, user: di
     shop = await _shop_or_404(shop_id)
     await db.shops.update_one({"id": shop_id}, {"$set": {"suspended": True, "suspension_reason": req.reason or ""}})
     await audit_log(user, "SUSPEND_SHOP", "shop", shop_id, False, True, _client_ip(request))
-    await notify(shop["owner_id"], "SHOP_SUSPENDED", "Boutique suspendue",
-                 f"Votre boutique {shop['name']} a été suspendue. {req.reason or ''}".strip())
+    await send_message(shop["owner_id"], "merchant_shop_suspended", {"shop": shop["name"], "reason": req.reason or "—"},
+                       "/merchant", "SHOP_SUSPENDED")
     return {"message": "Boutique suspendue"}
 
 
@@ -2690,8 +2500,7 @@ async def reactivate_shop(shop_id: str, request: Request, user: dict = Depends(r
     shop = await _shop_or_404(shop_id)
     await db.shops.update_one({"id": shop_id}, {"$set": {"suspended": False, "suspension_reason": ""}})
     await audit_log(user, "REACTIVATE_SHOP", "shop", shop_id, True, False, _client_ip(request))
-    await notify(shop["owner_id"], "SHOP_REACTIVATED", "Boutique réactivée",
-                 f"Votre boutique {shop['name']} est de nouveau active.")
+    await send_message(shop["owner_id"], "merchant_shop_reactivated", {"shop": shop["name"]}, "/merchant", "SHOP_REACTIVATED")
     return {"message": "Boutique réactivée"}
 
 
@@ -2711,17 +2520,6 @@ async def set_shop_quota(shop_id: str, req: ShopQuotaReq, request: Request, user
     await db.shops.update_one({"id": shop_id}, {"$set": upd})
     await audit_log(user, "SET_SHOP_QUOTA", "shop", shop_id, shop.get("product_quota"), upd["product_quota"], _client_ip(request))
     return {"message": "Quota mis à jour", **upd}
-
-
-@api.put("/admin/shops/{shop_id}/personal-api")
-async def toggle_shop_personal_api(shop_id: str, req: ShopPersonalApiToggleReq, request: Request, user: dict = Depends(require_module("shops"))):
-    shop = await _shop_or_404(shop_id)
-    upd = {"allow_personal_api": req.allow_personal_api}
-    await db.shops.update_one({"id": shop_id}, {"$set": upd})
-    await audit_log(user, "TOGGLE_PERSONAL_API", "shop", shop_id, shop.get("allow_personal_api"), req.allow_personal_api, _client_ip(request))
-    await notify(shop["owner_id"], "SHOP_SETTINGS_CHANGED", "Paramètres boutique modifiés",
-                 f"L'administrateur a {'autorisé' if req.allow_personal_api else 'désautorisé'} l'utilisation d'APIs personnalisées pour votre boutique.")
-    return {"message": "API personnalisée " + ("autorisée" if req.allow_personal_api else "désautorisée"), "allow_personal_api": req.allow_personal_api}
 
 
 @api.get("/admin/shops/{shop_id}")
@@ -2835,7 +2633,8 @@ async def admin_decide_withdrawal(wid: str, req: WithdrawDecisionReq, request: R
                             "WITHDRAWN", f"Retrait traité #{wid[:8]}", actor_id=user["id"])
         await db.withdrawal_requests.update_one({"id": wid}, {"$set": {"debited": True}})
     await audit_log(user, "WITHDRAWAL_DECISION", "withdrawal", wid, w["status"], status, _client_ip(request))
-    await notify(w["user_id"], "WITHDRAWAL", "Retrait", f"Votre demande de retrait est : {status}")
+    await send_message(w["user_id"], "client_withdrawal_processed", {"amount": _m(w.get("amount"), w.get("currency")), "status": status},
+                       "/account/wallet", "WITHDRAWAL")
     return {"message": "Décision enregistrée"}
 
 
@@ -2945,6 +2744,9 @@ async def assign_shipping(order_id: str, req: ShippingReq, user: dict = Depends(
     await audit_log(user, "ASSIGN_CARRIER", "order", order_id, order.get("carrier_name"), carrier["name"])
     await notify(order["customer_id"], "ORDER_UPDATE", "Transporteur assigné",
                  f"Commande {order['ref']} confiée à {carrier['name']}. Suivi : {upd.get('tracking_number', order.get('tracking_number'))}")
+    await send_to_users({"role": "CARRIER_AGENT", "carrier_id": carrier["id"], "status": "ACTIVE"}, "carrier_new_parcel",
+                        {"ref": order["ref"], "shop": order.get("shop_name", ""),
+                         "destination": order.get("destination_country") or order.get("address", "")}, "/partner", "PARCEL")
     return {"message": "Transporteur assigné", **upd}
 
 
@@ -2992,10 +2794,25 @@ async def confirm_receipt(order_id: str, req: ConfirmReceiptReq, user: dict = De
     if code != order.get("tracking_number") and code != order.get("ref"):
         raise HTTPException(status_code=400, detail="Code de suivi invalide")
     await db.orders.update_one({"id": order_id}, {"$set": {"delivered_confirmed": True, "received_by": user["id"], "received_at": now_iso()}})
+    await _deliver_last_mile(order, user)
     await audit_log(user, "CONFIRM_RECEIPT", "order", order_id, None, code)
     await notify(order["customer_id"], "ORDER_UPDATE", "Réception confirmée",
                  f"Réception de la commande {order['ref']} confirmée par scan.")
     return {"message": "Réception confirmée"}
+
+
+# ---------------- Shop payment provider ----------------
+@api.put("/shops/{shop_id}/payment")
+async def update_payment_provider(shop_id: str, req: PaymentProviderReq, user: dict = Depends(require_roles("MERCHANT"))):
+    shop = await _shop_or_404(shop_id)
+    if shop["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    await db.shops.update_one({"id": shop_id}, {"$set": {
+        "payment_provider": req.provider or "MONITY_WORLD",
+        "payment_config": {"api_key": req.api_key or "", "account": req.account or ""},
+    }})
+    await audit_log(user, "UPDATE_PAYMENT_PROVIDER", "shop", shop_id, shop.get("payment_provider"), req.provider)
+    return {"message": "Fournisseur de paiement mis à jour"}
 
 
 @api.post("/orders/confirm-by-tracking")
@@ -3006,15 +2823,36 @@ async def confirm_by_tracking(req: ConfirmByTrackingReq, user: dict = Depends(ge
     if not order:
         raise HTTPException(status_code=404, detail="Aucune commande ne correspond à ce code")
     if order.get("delivered_confirmed"):
+        await _deliver_last_mile(order, user)
         return {"message": "Réception déjà confirmée", "ref": order["ref"]}
     await db.orders.update_one({"id": order["id"]}, {"$set": {"delivered_confirmed": True, "received_by": user["id"], "received_at": now_iso()}})
+    await _deliver_last_mile(order, user)
     await audit_log(user, "CONFIRM_RECEIPT", "order", order["id"], None, code)
     return {"message": "Réception confirmée", "ref": order["ref"]}
+
+
+async def _deliver_last_mile(order: dict, user: dict):
+    """Relay pickup / local courier handover confirmed by the client's code -> order delivered."""
+    if order.get("status") != "EXPEDIEE" or not order.get("last_mile"):
+        return
+    res = await db.orders.update_one({"id": order["id"], "status": "EXPEDIEE"}, {
+        "$set": {"status": "LIVREE"},
+        "$push": {"status_history": {"status": "LIVREE", "at": now_iso(), "by": user["id"]}}})
+    if res.modified_count:
+        shop = await db.shops.find_one({"id": order["shop_id"]})
+        await _apply_delivered(order, shop)
+        if shop:
+            await send_message(shop["owner_id"], "merchant_order_delivered", {"ref": order["ref"]}, "/merchant/orders", "ORDER_UPDATE")
+        await send_message(order["customer_id"], "client_order_delivered", {"ref": order["ref"]}, "/account/orders", "ORDER_UPDATE")
+        if order.get("carrier_id"):
+            await send_to_users({"role": "CARRIER_AGENT", "carrier_id": order["carrier_id"], "status": "ACTIVE"},
+                                "carrier_parcel_delivered", {"ref": order["ref"]}, "/partner", "PARCEL")
 
 
 # ---------------- Module 3: Product moderation & reports (signalements) ----------------
 @api.post("/products/{product_id}/report")
 async def report_product(product_id: str, req: ProductReportReq, user: dict = Depends(get_current_user)):
+    _deny_partner(user)
     product = await db.products.find_one({"id": product_id})
     if not product:
         raise HTTPException(status_code=404, detail="Article introuvable")
@@ -3079,7 +2917,8 @@ async def moderate_product(product_id: str, req: ProductModerateReq, request: Re
         msg = f"Votre produit « {product['name']} » a été {'validé' if new_status == 'APPROVED' else 'refusé'}."
         if new_status == "REJECTED" and req.reason:
             msg += f" Motif : {req.reason}"
-        await notify(shop["owner_id"], "PRODUCT_MODERATION", "Modération produit", msg, "/merchant/products")
+        await send_message(shop["owner_id"], "merchant_product_approved" if new_status == "APPROVED" else "merchant_product_rejected",
+                           {"product": product.get("name", ""), "reason": req.reason or "—"}, "/merchant/products", "PRODUCT_MODERATION")
     await audit_log(user, f"MODERATE_PRODUCT_{decision}", "product", product_id,
                     product.get("moderation_status"), new_status, _client_ip(request))
     return {"message": f"Produit {'validé' if new_status == 'APPROVED' else 'refusé'}"}
@@ -3110,9 +2949,9 @@ async def resolve_report(report_id: str, req: ReportActionReq, request: Request,
         product = await db.products.find_one({"id": pid})
         shop = await db.shops.find_one({"id": report["shop_id"]})
         if shop:
-            await notify(shop["owner_id"], "PRODUCT_MODERATION", "Produit retiré",
-                         f"Votre produit « {report.get('product_name')} » a été retiré suite à des signalements. {req.reason or ''}".strip(),
-                         "/merchant/products")
+            await send_message(shop["owner_id"], "merchant_product_rejected",
+                               {"product": report.get("product_name", ""), "reason": req.reason or "signalements"},
+                               "/merchant/products", "PRODUCT_MODERATION")
         await audit_log(user, "REPORT_REJECT_PRODUCT", "product", pid, None, req.reason, _client_ip(request))
     else:
         await db.product_reports.update_one({"id": report_id}, {"$set": {
@@ -3156,7 +2995,7 @@ async def _execute_approval(appr: dict, approver: dict):
         uid = appr["target_id"]
         await db.users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "DISABLED"}, "$inc": {"token_version": 1}})
         await db.shops.update_many({"owner_id": uid}, {"$set": {"suspended": True}})
-        await notify(uid, "ACCOUNT", "Compte désactivé", "Votre compte vendeur a été désactivé par un administrateur.")
+        await send_message(uid, "auth_account_suspended", {}, ntype="ACCOUNT")
 
 
 @api.get("/admin/rbac/meta")
@@ -3180,85 +3019,27 @@ async def list_staff(user: dict = Depends(require_module("admins"))):
     return {"staff": out}
 
 
-@api.post("/admin/staff/phone-otp")
-async def send_staff_phone_otp(req: StaffPhoneOtpReq, user: dict = Depends(require_super())):
-    phone = _normalize_phone(req.phone)
-    code = DEMO_OTP
-    verification_id = new_id()
-    await db.staff_phone_verifications.insert_one({
-        "id": verification_id,
-        "created_by": user["id"],
-        "phone": phone,
-        "code_hash": _hashlib.sha256(code.encode()).hexdigest(),
-        "attempts": 0,
-        "verified": False,
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-        "created_at": now_iso(),
-    })
-    # SMS delivery is currently a configured demo channel, consistent with platform 2FA.
-    logger.info("STAFF phone OTP for %s: %s", phone, code)
-    return {"verification_id": verification_id, "message": "Code OTP envoyé (simulation)", "demo_otp": code}
-
-
-@api.post("/admin/staff/phone-otp/verify")
-async def verify_staff_phone_otp(req: StaffPhoneOtpVerifyReq, user: dict = Depends(require_super())):
-    challenge = await db.staff_phone_verifications.find_one({
-        "id": req.verification_id,
-        "created_by": user["id"],
-    })
-    if not challenge or challenge.get("verified"):
-        raise HTTPException(status_code=400, detail="Vérification du téléphone invalide")
-    if challenge["expires_at"] < now_iso():
-        raise HTTPException(status_code=400, detail="Code OTP expiré")
-    if challenge.get("attempts", 0) >= 5:
-        raise HTTPException(status_code=429, detail="Trop de tentatives OTP")
-    if _hashlib.sha256((req.code or "").strip().encode()).hexdigest() != challenge["code_hash"]:
-        await db.staff_phone_verifications.update_one({"_id": challenge["_id"]}, {"$inc": {"attempts": 1}})
-        raise HTTPException(status_code=400, detail="Code OTP invalide")
-    await db.staff_phone_verifications.update_one(
-        {"_id": challenge["_id"]},
-        {"$set": {"verified": True, "verified_at": now_iso()}},
-    )
-    return {"message": "Téléphone vérifié"}
-
-
 @api.post("/admin/staff")
-async def create_staff(req: StaffCreateReq, request: Request, background_tasks: BackgroundTasks,
-                       user: dict = Depends(require_super())):
+async def create_staff(req: StaffCreateReq, request: Request, user: dict = Depends(require_super())):
     role = req.role.upper()
     if role not in rbac.STAFF_ROLES or role == "SUPER_ADMIN":
         raise HTTPException(status_code=400, detail="Rôle invalide")
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Cet e-mail est déjà utilisé")
-    phone = _normalize_phone(req.phone)
-    phone_verification = await db.staff_phone_verifications.find_one({
-        "id": req.phone_verification_id,
-        "created_by": user["id"],
-        "phone": phone,
-        "verified": True,
-        "consumed": {"$ne": True},
-    })
-    if not phone_verification:
-        raise HTTPException(status_code=400, detail="Le numéro de téléphone doit être vérifié avant la création")
-    country_scopes, shop_ids = await _validate_staff_scope(req.country_scopes, req.shop_ids)
     perms = req.permissions if isinstance(req.permissions, dict) else \
         {m: (m in rbac.DEFAULT_ROLE_PERMISSIONS.get(role, [])) for m in rbac.MODULES}
-    email_code = str(random.randint(100000, 999999))
     doc = {
         "name": req.name.strip(), "email": email, "password_hash": hash_password(req.password),
-        "phone": phone, "role": role, "country": country_scopes[0], "country_scopes": country_scopes,
-        "currency": currency_for_country(country_scopes[0])["code"], "token_version": 0,
-        "phone_verified": True, "email_verified": False, "email_code": email_code, "kyc_status": "NONE",
+        "phone": "", "role": role, "country": "", "currency": "", "token_version": 0,
+        "phone_verified": True, "email_verified": True, "kyc_status": "NONE",
         "invite_code": gen_invite_code(), "is_partner": False,
-        "status": "ACTIVE", "permissions": perms, "shop_ids": shop_ids,
+        "status": "ACTIVE", "permissions": perms, "shop_ids": req.shop_ids or [],
         "delegation": {"enabled": False}, "two_factor_enabled": False, "two_factor_channel": "email",
         "created_at": now_iso(), "created_by": user["id"],
     }
     res = await db.users.insert_one(doc)
     doc["_id"] = res.inserted_id
-    await db.staff_phone_verifications.update_one({"_id": phone_verification["_id"]}, {"$set": {"consumed": True}})
-    background_tasks.add_task(send_verification_email, email, email_code)
     await audit_log(user, "CREATE_STAFF", "user", str(res.inserted_id), None, role, _client_ip(request))
     return {"staff": _user_public(doc)}
 
@@ -3279,15 +3060,8 @@ async def update_staff(sid: str, req: StaffUpdateReq, request: Request, user: di
         upd["role"] = r; bump = True
     if req.permissions is not None:
         upd["permissions"] = {m: bool(req.permissions.get(m)) for m in rbac.MODULES}; bump = True
-    if req.country_scopes is not None or req.shop_ids is not None:
-        country_scopes, shop_ids = await _validate_staff_scope(
-            req.country_scopes if req.country_scopes is not None else target.get("country_scopes") or [target.get("country", "")],
-            req.shop_ids if req.shop_ids is not None else target.get("shop_ids", []),
-        )
-        upd["country_scopes"] = country_scopes
-        upd["country"] = country_scopes[0]
-        upd["currency"] = currency_for_country(country_scopes[0])["code"]
-        upd["shop_ids"] = shop_ids
+    if req.shop_ids is not None:
+        upd["shop_ids"] = req.shop_ids
     if req.status is not None:
         if req.status not in ("ACTIVE", "SUSPENDED", "DISABLED"):
             raise HTTPException(status_code=400, detail="Statut invalide")
@@ -3364,6 +3138,21 @@ async def admin_put_settings(req: SettingsReq, request: Request, user: dict = De
         upd["taxes_enabled"] = bool(req.taxes_enabled)
     if req.csv_import_enabled is not None:
         upd["csv_import_enabled"] = bool(req.csv_import_enabled)
+    if req.customs_enabled is not None:
+        upd["customs_enabled"] = bool(req.customs_enabled)
+    if req.intl_shipping_currency is not None:
+        code = req.intl_shipping_currency.strip().upper()
+        try:
+            known = (await fx.get_rates())["rates"]
+        except Exception:
+            raise HTTPException(status_code=503, detail="Taux de change indisponibles")
+        if code not in known:
+            raise HTTPException(status_code=400, detail="Devise non supportée par l'API de change")
+        upd["intl_shipping_currency"] = code
+    for k in ("intl_shipping_base", "intl_shipping_per_kg", "intl_shipping_per_km", "intl_default_weight_kg"):
+        v = getattr(req, k)
+        if v is not None:
+            upd[k] = max(0.0, float(v))
     if req.legal_content is not None:
         clean = {}
         for k in LEGAL_KINDS:
@@ -3439,35 +3228,127 @@ async def root():
     return {"message": "AfriMarket API", "status": "ok"}
 
 
-@api.get("/health")
-async def health():
-    try:
-        await db.command("ping")
-    except Exception as exc:
-        logger.error("Health check failed: MongoDB is unavailable", exc_info=exc)
-        raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    return {"status": "ok"}
+@api.post("/admin/export/link")
+async def create_export_link(user: dict = Depends(require_super())):
+    """Mint a short-lived signed token for downloading the export archive (super-admin only)."""
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=30)
+    await db.export_tokens.insert_one({
+        "token": token, "created_by": user["id"], "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(), "downloads": 0,
+    })
+    # Best-effort cleanup of expired tokens
+    await db.export_tokens.delete_many({"expires_at": {"$lt": now.isoformat()}})
+    return {"token": token, "url": f"/api/download/export?token={token}",
+            "expires_at": expires.isoformat(), "expires_in_minutes": 30}
 
 
 @api.get("/download/export")
-async def download_export():
+async def download_export(token: Optional[str] = None):
     from fastapi.responses import FileResponse
+    if not token:
+        raise HTTPException(status_code=403, detail="Lien invalide : un jeton de téléchargement sécurisé est requis.")
+    rec = await db.export_tokens.find_one({"token": token})
+    if not rec or rec.get("expires_at", "") < datetime.now(timezone.utc).isoformat():
+        raise HTTPException(status_code=403, detail="Lien expiré ou invalide. Générez un nouveau lien depuis l'administration.")
     path = "/app/afrimarket_export.zip"
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Archive introuvable")
+    await db.export_tokens.update_one({"token": token}, {"$inc": {"downloads": 1}})
     return FileResponse(path, media_type="application/zip", filename="afrimarket_export.zip")
 
 
+# ---------------- Mobile customer API compatibility ----------------
+@api.post("/mobile/auth/register")
+async def mobile_register(req: RegisterReq, background_tasks: BackgroundTasks):
+    if (req.role or "CLIENT").upper() != "CLIENT":
+        raise HTTPException(status_code=400, detail="Mobile app: clients only")
+    req.role = "CLIENT"
+    return await register(req, background_tasks)
+
+
+@api.post("/mobile/auth/login")
+async def mobile_login(req: LoginReq, request: Request):
+    existing = await db.users.find_one({"email": req.email.lower().strip()})
+    if existing and existing.get("role") != "CLIENT":
+        raise HTTPException(status_code=401, detail="E-mail ou mot de passe incorrect")
+    result = await login(req, request)
+    return result
+
+
+@api.post("/mobile/auth/logout")
+async def mobile_logout(user: dict = Depends(get_current_user)):
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$inc": {"token_version": 1}})
+    await db.login_attempts.delete_many({"email": user["email"]})
+    return {"message": "Déconnecté"}
+
+
+@api.get("/mobile/auth/me")
+async def mobile_me(user: dict = Depends(get_current_user)):
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    return {"user": _user_public(user)}
+
+
+@api.get("/mobile/products")
+async def mobile_list_products(
+    request: Request,
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    return await list_products(request, q=q, category=category, for_client=True)
+
+
+@api.get("/mobile/shops")
+async def mobile_list_shops(
+    q: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    return await list_shops(q=q)
+
+
+@api.get("/mobile/cart")
+async def mobile_get_cart(user: dict = Depends(get_current_user)):
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Clients only")
+    cart = await db.private_clients.find_one({"user_id": user["id"]})
+    if not cart:
+        return {"items": [], "count": 0, "total": 0}
+    items = []
+    for item in cart.get("items", []):
+        product = await db.products.find_one({"id": item.get("product_id")})
+        if product:
+            quantity = item.get("quantity", 1)
+            price = item.get("price", 0)
+            items.append({
+                "product_id": item["product_id"],
+                "product_name": product.get("name"),
+                "quantity": quantity,
+                "price": price,
+                "shop_id": product.get("shop_id"),
+            })
+    total = sum(float(i["price"] or 0) * int(i["quantity"] or 1) for i in items)
+    return {"items": items, "count": len(items), "total": total}
+
+
 app.include_router(api)
-cors_origins = [
-    origin.strip()
-    for origin in os.environ.get("CORS_ORIGINS", "*").split(",")
-    if origin.strip()
-]
+app.include_router(logistics.router)
+app.include_router(messaging.router)
+app.include_router(payapis.router)
+app.include_router(accounts.router)
+app.include_router(categories.router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=False,
-    allow_origins=cors_origins,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -3490,15 +3371,6 @@ async def startup():
     await db.orders.create_index("customer_id")
     await db.wallet_transactions.create_index("user_id")
     await db.otp_challenges.create_index("id")
-    await db.staff_phone_verifications.create_index("id", unique=True)
-    await db.staff_phone_verifications.create_index("expires_at", expireAfterSeconds=0)
-    await db.country_payment_apis.create_index("id", unique=True)
-    await db.country_payment_apis.create_index("country")
-    await db.country_payment_apis.create_index([("country", 1), ("active", 1), ("created_at", 1)])
-    await db.categories.create_index("id", unique=True)
-    await db.subcategories.create_index("id", unique=True)
-    await db.subcategories.create_index("category_id")
-    await db.countries.create_index("name", unique=True)
     await db.login_journal.create_index("created_at")
     await db.approval_requests.create_index("status")
     await db.product_reports.create_index("product_id")
@@ -3520,10 +3392,6 @@ async def startup():
         for d in defaults:
             await db.carriers.insert_one({"id": new_id(), "tracking_url": "", "active": True,
                                           "suspended": False, "created_at": now_iso(), **d})
-    if await db.countries.count_documents({}) == 0:
-        for country in COUNTRIES:
-            await db.countries.insert_one({"name": country["name"], "iso2": country["iso2"],
-                                           "currency": country["currency"], "active": True, "created_at": now_iso()})
     await seed_module.seed(db)
     await db.products.update_many({"moderation_status": {"$exists": False}},
                                   {"$set": {"moderation_status": "APPROVED", "moderation_reason": "", "flagged": False}})

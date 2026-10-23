@@ -11,7 +11,7 @@ import { Search, Store, ShieldCheck, Truck, Wallet, ArrowRight } from "lucide-re
 
 const BANNER = "https://images.unsplash.com/photo-1772580310425-63f2290c2ba7?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHw0fHxhZnJpY2FuJTIwbWFya2V0cGxhY2UlMjBwcm9kdWN0c3xlbnwwfHx8fDE3ODk5NzM2MzF8MA&ixlib=rb-4.1.0&q=85";
 
-const CAT_ICONS = ["🧵", "📱", "🏠", "🥫", "💄", "🎨"];
+const CAT_ICONS = { "Mode & Vêtements": "🧵", "Électronique": "📱", "Maison & Cuisine": "🏠", "Alimentation": "🥫", "Beauté & Cosmétiques": "💄", "Artisanat": "🎨" };
 
 export default function Home() {
   const { t } = useI18n();
@@ -107,7 +107,7 @@ export default function Home() {
                   className="bg-card border border-border rounded-xl p-4 text-center card-lift"
                   data-testid={`cat-${c.name}`}
                 >
-                  <div className="text-2xl mb-1">{CAT_ICONS[i % CAT_ICONS.length]}</div>
+                  <div className="text-2xl mb-1">{CAT_ICONS[c.name] || "🏷️"}</div>
                   <div className="text-xs font-medium line-clamp-2">{c.name}</div>
                 </Link>
               ))}

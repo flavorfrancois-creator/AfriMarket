@@ -1,11 +1,13 @@
 import React from "react";
-import { Outlet, Navigate } from "react-router-dom";
+import { Outlet, Navigate, useLocation } from "react-router-dom";
 import { PublicHeader } from "@/components/PublicHeader";
 import { Footer } from "@/components/Footer";
 import { useAuth } from "@/context/AuthContext";
 import { Loader2 } from "lucide-react";
 
 export function PublicLayout() {
+  const { user } = useAuth();
+  if (user && (user.role === "RELAY_MANAGER" || user.role === "CARRIER_AGENT")) return <Navigate to="/partner" replace />;
   return (
     <div className="min-h-screen flex flex-col">
       <PublicHeader />
@@ -27,8 +29,9 @@ export function Loading({ full }) {
 
 export function ProtectedRoute({ roles }) {
   const { user } = useAuth();
+  const location = useLocation();
   if (user === null) return <Loading full />;
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   if (roles && !roles.includes(user.role)) {
     const staff = ["SUPER_ADMIN", "ADMIN", "SHOP_ADMIN", "PRODUCT_MANAGER", "ORDER_MANAGER", "MODERATOR", "ACCOUNTANT"];
     const home = user.role === "MERCHANT" ? "/merchant" : (user.role === "CLIENT" ? "/account" : (staff.includes(user.role) ? "/admin" : "/"));

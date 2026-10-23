@@ -1,0 +1,15 @@
+crons:
+  - name: daily-reminders
+    description: "Daily 8am UTC: uncollected relay parcels to relay points, late deliveries to carriers"
+    cron: "0 8 * * *"
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    endpoint: "{{BASE_URL}}/api/cron/daily-reminders"
+    method: POST
+    enabled: true
+  - name: account-purge
+    description: "Daily 3am UTC: fully erase accounts deleted more than 3 months ago"
+    cron: "0 3 * * *"
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    endpoint: "{{BASE_URL}}/api/cron/account-purge"
+    method: POST
+    enabled: true

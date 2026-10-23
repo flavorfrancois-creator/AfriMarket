@@ -12,11 +12,15 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu, Bell, User, LogOut, Store, Home } from "lucide-react";
 
+export const isPartnerRole = (role) => role === "RELAY_MANAGER" || role === "CARRIER_AGENT";
+
 function SidebarContent({ nav, title, subtitle }) {
   const location = useLocation();
+  const { user } = useAuth();
+  const home = isPartnerRole(user?.role) ? nav[0].to : "/";
   return (
     <div className="flex flex-col h-full">
-      <Link to="/" className="flex items-center gap-2 px-5 h-16 border-b border-border shrink-0">
+      <Link to={home} className="flex items-center gap-2 px-5 h-16 border-b border-border shrink-0">
         <div className="w-8 h-8 rounded-lg bg-primary text-primary-foreground grid place-items-center font-display font-extrabold">A</div>
         <div className="leading-tight">
           <div className="font-display font-bold text-sm truncate max-w-[150px]">{title}</div>
@@ -26,7 +30,7 @@ function SidebarContent({ nav, title, subtitle }) {
       <ScrollArea className="flex-1">
         <nav className="p-3 flex flex-col gap-0.5">
           {nav.map((n) => {
-            const active = location.pathname === n.to || (n.to !== nav[0].to && location.pathname.startsWith(n.to));
+            const active = location.pathname === n.to || (n.to !== nav[0].to && location.pathname.startsWith(n.to + "/"));
             const Icon = n.icon;
             return (
               <Link
@@ -51,6 +55,7 @@ export function DashboardShell({ nav, title, subtitle }) {
   const { user, logout } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
+  const partner = isPartnerRole(user?.role);
   const [notifs, setNotifs] = useState([]);
   const [unread, setUnread] = useState(0);
 
@@ -92,9 +97,11 @@ export function DashboardShell({ nav, title, subtitle }) {
 
           <div className="ml-auto flex items-center gap-1.5">
             <LanguageSwitcher compact />
-            <Button variant="ghost" size="icon" onClick={() => navigate("/")} title={t("home")} className="hidden sm:inline-flex">
-              <Home className="w-5 h-5" />
-            </Button>
+            {!partner && (
+              <Button variant="ghost" size="icon" onClick={() => navigate("/")} title={t("home")} className="hidden sm:inline-flex" data-testid="dash-home">
+                <Home className="w-5 h-5" />
+              </Button>
+            )}
             <DropdownMenu onOpenChange={(o) => o && loadNotifs()}>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="relative" data-testid="notif-btn">
@@ -136,10 +143,12 @@ export function DashboardShell({ nav, title, subtitle }) {
                   <div className="text-xs text-muted-foreground">{user?.role}</div>
                 </div>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => navigate("/")}>
-                  <Store className="w-4 h-4 mr-2" /> Marketplace
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => { logout(); navigate("/"); }} data-testid="dash-logout">
+                {!partner && (
+                  <DropdownMenuItem onClick={() => navigate("/")} data-testid="dash-marketplace">
+                    <Store className="w-4 h-4 mr-2" /> Marketplace
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => { logout(); navigate(partner ? "/login" : "/"); }} data-testid="dash-logout">
                   <LogOut className="w-4 h-4 mr-2" /> {t("logout")}
                 </DropdownMenuItem>
               </DropdownMenuContent>

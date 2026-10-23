@@ -46,13 +46,22 @@ const MAP = {
   OPEN: "bg-amber-100 text-amber-800",
   RESOLVED: "bg-green-100 text-green-800",
   DISMISSED: "bg-gray-200 text-gray-700",
+  AWAITING_USER: "bg-indigo-100 text-indigo-800",
+  COMPLETED: "bg-gray-200 text-gray-700",
+  RESTORED: "bg-green-100 text-green-800",
+  CANCELLED: "bg-gray-200 text-gray-700",
 };
 
-export function StatusBadge({ status }) {
+export const ACCOUNT_REQ_LABELS = {
+  PENDING: "En attente", AWAITING_USER: "Attente confirmation", COMPLETED: "Effectuée",
+  REJECTED: "Refusée", CANCELLED: "Annulée", RESTORED: "Restauré",
+};
+
+export function StatusBadge({ status, label }) {
   const cls = MAP[status] || "bg-gray-100 text-gray-700";
   return (
     <Badge className={`${cls} border-0 rounded-full font-medium hover:${cls}`} data-testid={`status-${status}`}>
-      {String(status || "").replace(/_/g, " ")}
+      {label || String(status || "").replace(/_/g, " ")}
     </Badge>
   );
 }

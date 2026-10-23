@@ -2,7 +2,9 @@ import React, { useEffect, useState } from "react";
 import { useSearchParams, useParams, Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import api, { apiErr } from "@/lib/api";
-import { money } from "@/lib/currency";
+import { PayApiPicker } from "@/components/PayApiPicker";
+import { money as rawMoney } from "@/lib/currency";
+import { useFx } from "@/context/CurrencyContext";
 import { useI18n } from "@/lib/i18n";
 import { useCart } from "@/context/CartContext";
 import { useAuth } from "@/context/AuthContext";
@@ -19,7 +21,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 export function Products() {
   const { t } = useI18n();
   const { active } = usePrivateClient();
-  const { userLocation } = useAuth();
   const [sp] = useSearchParams();
   const [products, setProducts] = useState(null);
   const q = sp.get("q") || "";
@@ -41,14 +42,6 @@ export function Products() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-10">
       <PageHeader title={title} subtitle={products ? `${products.length} article(s)` : ""} />
-      {userLocation && (userLocation.country || userLocation.city) && (
-        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2 text-sm">
-          <MapPin className="w-4 h-4 text-blue-600" />
-          <span className="text-blue-900">
-            {userLocation.city && userLocation.country ? `Recherche autour de ${userLocation.city}, ${userLocation.country}` : userLocation.country ? `Recherche dans ${userLocation.country}` : ""}
-          </span>
-        </div>
-      )}
       {products === null ? (
         <Loading />
       ) : products.length === 0 ? (
@@ -64,7 +57,6 @@ export function Products() {
 
 export function Shops() {
   const { t } = useI18n();
-  const { userLocation } = useAuth();
   const [shops, setShops] = useState(null);
   const [q, setQ] = useState("");
   useEffect(() => {
@@ -74,24 +66,11 @@ export function Shops() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-10">
       <PageHeader title={t("shops")} />
-      {userLocation && (userLocation.country || userLocation.city) && (
-        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2 text-sm">
-          <MapPin className="w-4 h-4 text-green-600" />
-          <span className="text-green-900">
-            {userLocation.city && userLocation.country ? `Recherche autour de ${userLocation.city}, ${userLocation.country}` : userLocation.country ? `Recherche dans ${userLocation.country}` : ""}
-          </span>
-        </div>
-      )}
       <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Rechercher une boutique ou une ville..." className="max-w-md mb-6 rounded-full" data-testid="shop-search" />
       {shops === null ? <Loading /> : filtered.length === 0 ? <EmptyState title="Aucune boutique" /> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((s) => (
-            <Link key={s.id} to={`/shops/${s.id}`} className="bg-card border border-border rounded-xl overflow-hidden card-lift relative" data-testid={`shop-${s.id}`}>
-              {s.distance_km !== undefined && s.distance_km !== null && isFinite(s.distance_km) && (
-                <span className="absolute top-2 right-2 bg-green-600 text-white text-xs font-semibold px-2 py-1 rounded-full flex items-center gap-1 z-10">
-                  <MapPin className="w-3 h-3" /> {s.distance_km.toFixed(1)}km
-                </span>
-              )}
+            <Link key={s.id} to={`/shops/${s.id}`} className="bg-card border border-border rounded-xl overflow-hidden card-lift" data-testid={`shop-${s.id}`}>
               <div className="p-5 flex items-center gap-4">
                 <img src={s.logo} alt="" className="w-16 h-16 rounded-xl object-cover" />
                 <div className="min-w-0">
@@ -149,6 +128,7 @@ export function ProductDetail() {
   const { id } = useParams();
   const { add } = useCart();
   const { user } = useAuth();
+  const { fmt: money, target } = useFx();
   const { active, client } = usePrivateClient();
   const [data, setData] = useState(null);
   const [qty, setQty] = useState(1);
@@ -224,6 +204,11 @@ export function ProductDetail() {
             <span className="text-3xl font-display font-extrabold font-mono">{money(p.display_price, p.currency)}</span>
           )}
         </div>
+        {target && p.currency && p.currency !== target && (
+          <div className="mt-1 text-xs text-muted-foreground" data-testid="detail-original-price">
+            Prix d'origine : {rawMoney(p.is_promo ? p.promo_price : p.display_price, p.currency)} — converti en {target} au taux du jour
+          </div>
+        )}
         <div className="mt-1 text-xs text-muted-foreground">
           {active ? <>Prix client simple — commande pour <strong>{client?.name}</strong></> : <>Prix {TYPE_LABEL[p.viewer_type] || "Client Simple"}</>}
         </div>
@@ -308,13 +293,14 @@ export function ProductDetail() {
 }
 
 export function Cart() {
-  const { items, remove, setQty, total, totalSimple, clear } = useCart();
+  const { items, remove, setQty, clear } = useCart();
   const navigate = useNavigate();
   const { user } = useAuth();
   const { active, client } = usePrivateClient();
-  const cur = items[0]?.currency || "";
+  const { fmt: money, convert, target } = useFx();
+  const cur = target || items[0]?.currency || "";
   const linePrice = (i) => (active ? (i.price_simple ?? i.price) : i.price);
-  const shownTotal = active ? totalSimple : total;
+  const shownTotal = items.reduce((s, i) => s + convert(linePrice(i) * i.qty, i.currency).amount, 0);
   return (
     <div className="max-w-5xl mx-auto px-4 py-10">
       <PageHeader title="Mon panier" subtitle={`${items.length} article(s)`} />
@@ -348,9 +334,9 @@ export function Cart() {
           </div>
           <div className="bg-card border border-border rounded-xl p-5 h-fit">
             <h3 className="font-display font-bold mb-4">Récapitulatif</h3>
-            <div className="flex justify-between text-sm mb-2"><span className="text-muted-foreground">Sous-total</span><span className="font-mono font-semibold">{money(shownTotal, cur)}</span></div>
-            <div className="text-xs text-muted-foreground mb-4">Frais de livraison calculés à la commande.</div>
-            <Button className="w-full rounded-full h-11" onClick={() => navigate(user ? "/checkout" : "/login")} data-testid="checkout-btn">
+            <div className="flex justify-between text-sm mb-2"><span className="text-muted-foreground">Sous-total</span><span className="font-mono font-semibold" data-testid="cart-subtotal">{rawMoney(shownTotal, cur)}</span></div>
+            <div className="text-xs text-muted-foreground mb-4">Frais de transport et de douane calculés à la commande.</div>
+            <Button className="w-full rounded-full h-11" onClick={() => navigate(user ? "/checkout" : "/login", user ? undefined : { state: { from: "/cart" } })} data-testid="checkout-btn">
               {user ? "Passer commande" : "Se connecter pour commander"}
             </Button>
             <Button variant="ghost" className="w-full mt-2 text-muted-foreground" onClick={clear}>Vider le panier</Button>
@@ -362,31 +348,47 @@ export function Cart() {
 }
 
 export function Checkout() {
-  const { items, total, totalSimple, totalMargin, clear } = useCart();
+  const { items, totalMargin, clear } = useCart();
   const navigate = useNavigate();
   const { active, client, clear: clearPrivate } = usePrivateClient();
+  const { fmt: money } = useFx();
   const [address, setAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [useWallet, setUseWallet] = useState(false);
-  const cur = items[0]?.currency || "";
+  const [quote, setQuote] = useState(null);
+  const [customsMode, setCustomsMode] = useState("NOW");
+  const [payApiId, setPayApiId] = useState(null);
+  const [quoteError, setQuoteError] = useState("");
   const linePrice = (i) => (active ? (i.price_simple ?? i.price) : i.price);
-  const shownTotal = active ? totalSimple : total;
+  const baseItems = items.map((i) => ({ product_id: i.product_id, qty: i.qty, variant_id: i.variant_id || null }));
+  const itemsKey = JSON.stringify(baseItems);
+  const cur = quote?.buyer_currency || items[0]?.currency || "";
 
   useEffect(() => { api.get("/wallet").then((r) => setWallet(r.data)).catch(() => {}); }, []);
+  useEffect(() => {
+    if (!baseItems.length) { return; }
+    const payload = { items: baseItems };
+    if (active) payload.private_client = client;
+    api.post("/orders/quote", payload).then((r) => { setQuote(r.data); setQuoteError(""); }).catch((e) => setQuoteError(apiErr(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemsKey, active]);
   const avail = wallet?.total_available || 0;
-  const walletApplied = useWallet ? Math.min(avail, shownTotal) : 0;
-  const toPay = Math.max(0, shownTotal - walletApplied);
+  const payable = quote ? (customsMode === "NOW" ? quote.total_with_customs : quote.total_without_customs) : 0;
+  const walletApplied = useWallet ? Math.min(avail, payable) : 0;
+  const toPay = Math.max(0, payable - walletApplied);
 
   const submit = async () => {
     if (items.length === 0) return;
     setLoading(true);
     try {
       const payload = {
-        items: items.map((i) => ({ product_id: i.product_id, qty: i.qty, variant_id: i.variant_id || null })),
+        items: baseItems,
         address: active ? (client?.address || client?.city || "") : address,
         payment_method: "MOCK",
         use_wallet: useWallet,
+        customs_payment: customsMode,
+        payment_api_id: payApiId,
       };
       if (active) payload.private_client = client;
       const { data } = await api.post("/orders", payload);
@@ -433,38 +435,78 @@ export function Checkout() {
             </div>
           ))}
           <div className="border-t border-border mt-3 pt-3 flex justify-between font-semibold">
-            <span>Sous-total</span><span className="font-mono">{money(shownTotal, cur)}</span>
+            <span>Sous-total</span><span className="font-mono" data-testid="checkout-subtotal">{rawMoney(quote?.subtotal, cur)}</span>
           </div>
           {active && totalMargin > 0 && (
             <div className="flex justify-between text-sm text-green-700 mt-1" data-testid="checkout-margin">
-              <span>Votre marge revendeur estimée</span><span className="font-mono">{money(totalMargin, cur)}</span>
+              <span>Votre marge revendeur estimée</span><span className="font-mono">{money(totalMargin, items[0]?.currency)}</span>
             </div>
           )}
         </div>
+
+        {quoteError ? (
+          <div className="bg-destructive/10 border border-destructive/30 text-destructive rounded-xl p-5 text-sm" data-testid="quote-error">{quoteError}</div>
+        ) : <QuoteBreakdown quote={quote} customsMode={customsMode} setCustomsMode={setCustomsMode} payable={payable} />}
 
         <div className="bg-card border border-border rounded-xl p-5">
           <label className="flex items-center justify-between gap-2 cursor-pointer">
             <div>
               <div className="font-medium text-sm">Payer avec mon solde</div>
-              <div className="text-xs text-muted-foreground">Solde disponible : <span className="font-mono">{money(avail, cur)}</span></div>
+              <div className="text-xs text-muted-foreground">Solde disponible : <span className="font-mono">{rawMoney(avail, cur)}</span></div>
             </div>
             <input type="checkbox" checked={useWallet} disabled={avail <= 0} onChange={(e) => setUseWallet(e.target.checked)} data-testid="use-wallet-toggle" className="w-5 h-5" />
           </label>
           {useWallet && (
             <div className="mt-3 text-sm space-y-1 border-t border-border pt-3">
-              <div className="flex justify-between"><span className="text-muted-foreground">Payé avec le solde</span><span className="font-mono text-green-700">−{money(walletApplied, cur)}</span></div>
-              <div className="flex justify-between font-semibold"><span>Reste à payer ({items[0]?.shop_name ? "par commande" : ""})</span><span className="font-mono">{money(toPay, cur)}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Payé avec le solde</span><span className="font-mono text-green-700">−{rawMoney(walletApplied, cur)}</span></div>
+              <div className="flex justify-between font-semibold"><span>Reste à payer ({items[0]?.shop_name ? "par commande" : ""})</span><span className="font-mono">{rawMoney(toPay, cur)}</span></div>
             </div>
           )}
         </div>
 
-        <div className="bg-accent/50 border border-border rounded-xl p-4 text-sm text-muted-foreground">
-          Paiement : <span className="font-semibold text-foreground">Monity World (simulation)</span>. Aucun débit réel.
+        <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+          <PayApiPicker kind="PAYMENT" value={payApiId} onChange={setPayApiId} />
+          <div className="text-sm text-muted-foreground">Paiement en <span className="font-semibold text-foreground">simulation</span>. Aucun débit réel.</div>
         </div>
-        <Button className="w-full rounded-full h-12" disabled={loading} onClick={submit} data-testid="confirm-order-btn">
-          {loading ? "Traitement..." : "Confirmer et payer"}
+        <Button className="w-full rounded-full h-12" disabled={loading || !quote} onClick={submit} data-testid="confirm-order-btn">
+          {loading ? "Traitement..." : `Confirmer et payer ${quote ? rawMoney(toPay, cur) : ""}`}
         </Button>
       </div>
+    </div>
+  );
+}
+
+function QuoteBreakdown({ quote, customsMode, setCustomsMode, payable }) {
+  if (!quote) return <div className="bg-card border border-border rounded-xl p-5 text-sm text-muted-foreground" data-testid="quote-loading">Calcul du transport, de la douane et de la conversion...</div>;
+  const cur = quote.buyer_currency;
+  return (
+    <div className="bg-card border border-border rounded-xl p-5 space-y-3" data-testid="checkout-quote">
+      <h3 className="font-display font-bold">Transport, douane et conversion</h3>
+      {quote.shops.map((s) => (
+        <div key={s.shop_id} className="text-sm border-b border-border/50 pb-2" data-testid={`quote-shop-${s.shop_id}`}>
+          <div className="font-medium">{s.shop_name} <span className="text-xs text-muted-foreground">({s.shop_country || "—"})</span></div>
+          {s.shop_currency !== cur && (
+            <div className="text-xs text-muted-foreground" data-testid={`quote-fx-${s.shop_id}`}>1 {s.shop_currency} = {Number(s.fx_rate).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {cur} (taux du {s.fx_updated_at ? new Date(s.fx_updated_at).toLocaleDateString("fr-FR") : "jour"})</div>
+          )}
+          <div className="flex justify-between"><span className="text-muted-foreground">Articles</span><span className="font-mono">{rawMoney(s.subtotal, cur)}</span></div>
+          <div className="flex justify-between"><span className="text-muted-foreground">Transport{s.international ? ` international (${Math.round(s.distance_km)} km, ${s.weight_kg} kg)` : ""}</span><span className="font-mono" data-testid={`quote-shipping-${s.shop_id}`}>{rawMoney(s.shipping_buyer, cur)}</span></div>
+          {s.customs_fee > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Frais de douane ({s.customs_rate}%)</span><span className="font-mono" data-testid={`quote-customs-${s.shop_id}`}>{rawMoney(s.customs_fee, cur)}</span></div>}
+        </div>
+      ))}
+      {quote.customs > 0 && (
+        <div className="space-y-2" data-testid="customs-choice">
+          <div className="text-sm font-medium">Paiement des frais de douane ({rawMoney(quote.customs, cur)})</div>
+          {[["NOW", "Payer maintenant avec la commande"], ["ON_DELIVERY", "Payer à la livraison"]].map(([v, l]) => (
+            <label key={v} className={`flex items-center gap-2 border rounded-lg px-3 py-2 text-sm cursor-pointer transition-colors ${customsMode === v ? "border-primary bg-primary/5" : "border-border"}`}>
+              <input type="radio" name="customs" checked={customsMode === v} onChange={() => setCustomsMode(v)} data-testid={`customs-${v.toLowerCase()}`} />{l}
+            </label>
+          ))}
+        </div>
+      )}
+      <div className="flex justify-between font-semibold pt-1"><span>Total à payer maintenant</span><span className="font-mono" data-testid="checkout-payable">{rawMoney(payable, cur)}</span></div>
+      {quote.customs > 0 && customsMode === "ON_DELIVERY" && (
+        <div className="flex justify-between text-sm text-amber-700"><span>À payer à la livraison (douane)</span><span className="font-mono" data-testid="checkout-due-delivery">{rawMoney(quote.customs, cur)}</span></div>
+      )}
     </div>
   );
 }

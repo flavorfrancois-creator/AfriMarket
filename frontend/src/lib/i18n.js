@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
+import api from "@/lib/api";
 
 const DICT = {
   fr: {
@@ -109,6 +110,7 @@ export function I18nProvider({ children }) {
   const change = useCallback((l) => {
     setLang(l);
     localStorage.setItem("am_lang", l);
+    if (localStorage.getItem("am_token")) api.put("/auth/language", { language: l }).catch(() => {});
   }, []);
   const t = useCallback((key) => (DICT[lang] && DICT[lang][key]) || DICT.fr[key] || key, [lang]);
   return <I18nContext.Provider value={{ lang, setLang: change, t }}>{children}</I18nContext.Provider>;

@@ -23,13 +23,13 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Home, Package, ShoppingCart, Users, Lightbulb, Boxes, BarChart3, Gift, Tag, Settings,
   Plus, Pencil, Trash2, Minus, TrendingUp, AlertTriangle, CheckCircle2, Clock, Phone, Mail, IdCard, Store, FileText,
-  Upload, X, Image as ImageIcon, Layers, UploadCloud,
+  Upload, X, Image as ImageIcon, Layers, UploadCloud, UserCog,
 } from "lucide-react";
+import { CategoryPicker } from "@/components/CategoryPicker";
 
 const MerchantCtx = createContext(null);
 const useMerchant = () => useContext(MerchantCtx);
 
-const CATS = ["Mode & Vêtements", "Électronique", "Maison & Cuisine", "Alimentation", "Beauté & Cosmétiques", "Artisanat"];
 
 export function MerchantLayout() {
   const { t } = useI18n();
@@ -53,6 +53,7 @@ export function MerchantLayout() {
     { to: "/merchant/loyalty", label: t("loyalty"), icon: Gift, testid: "loyalty" },
     { to: "/merchant/promotions", label: t("promos"), icon: Tag, testid: "promotions" },
     { to: "/merchant/settings", label: t("settings"), icon: Settings, testid: "settings" },
+    { to: "/merchant/account", label: "Mon compte", icon: UserCog, testid: "account" },
   ];
   return (
     <MerchantCtx.Provider value={{ shop, reload }}>
@@ -289,7 +290,7 @@ export function MerchantOverview() {
 /* ---------------- Products ---------------- */
 const emptyProduct = {
   name: "", short_description: "", description: "", image: "https://images.unsplash.com/photo-1560343090-f0409e92791a?q=80&w=600",
-  gallery: [], category: "", stock: 0, alert_threshold: 5, price_simple: 0, price_partner: 0, price_pro: 0, price_enterprise: 0,
+  gallery: [], category: "", subcategory: "", stock: 0, alert_threshold: 5, price_simple: 0, price_partner: 0, price_pro: 0, price_enterprise: 0,
   shipping_fee: 0, weight: 0, dimensions: "", sku: "", variants: [],
   promo: { enabled: false, promo_price: 0, promo_qty: 0, promo_sold: 0 },
 };
@@ -407,12 +408,7 @@ function ProductForm({ initial, onSaved, shop }) {
       <div><Label>Description courte</Label><Input value={f.short_description} onChange={(e) => upd("short_description", e.target.value)} className="mt-1" /></div>
       <div><Label>Description complète</Label><Textarea value={f.description} onChange={(e) => upd("description", e.target.value)} className="mt-1" /></div>
       <div className="grid grid-cols-2 gap-3">
-        <div><Label>Catégorie</Label>
-          <Select value={f.category} onValueChange={(v) => upd("category", v)}>
-            <SelectTrigger className="mt-1" data-testid="prod-category"><SelectValue placeholder="Catégorie" /></SelectTrigger>
-            <SelectContent>{CATS.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
-          </Select>
-        </div>
+        <CategoryPicker category={f.category} subcategory={f.subcategory} onChange={(c, s) => setF((x) => ({ ...x, category: c, subcategory: s }))} />
         <div><Label>Stock {hasVariants && <span className="text-[10px] text-muted-foreground">(auto = Σ variantes)</span>}</Label><Input type="number" value={f.stock} onChange={(e) => upd("stock", e.target.value)} className="mt-1" disabled={hasVariants} data-testid="prod-stock" /></div>
       </div>
       <div className="bg-accent/40 rounded-lg p-3">
@@ -527,7 +523,7 @@ export function MerchantProducts() {
               {products.map((p) => (
                 <TableRow key={p.id} data-testid={`prod-row-${p.id}`}>
                   <TableCell><div className="flex items-center gap-2"><img src={p.image} alt="" className="w-9 h-9 rounded object-cover" /><span className="font-medium text-sm">{p.name}</span>{p.promo?.enabled && <span className="text-[10px] bg-primary text-white px-1.5 rounded">PROMO</span>}</div></TableCell>
-                  <TableCell className="text-xs">{p.category}</TableCell>
+                  <TableCell className="text-xs">{p.category ? `${p.category}${p.subcategory ? ` › ${p.subcategory}` : ""}` : <span className="text-amber-700 font-medium" data-testid={`uncategorized-${p.id}`}>Sans catégorie — à réattribuer</span>}</TableCell>
                   <TableCell className="text-right font-mono">{money(p.price_simple, p.currency)}</TableCell>
                   <TableCell className={`text-right font-mono ${p.stock === 0 ? "text-red-600" : p.stock <= p.alert_threshold ? "text-amber-600" : ""}`}>{p.stock}</TableCell>
                   <TableCell><StatusBadge status={p.stock === 0 ? "REJETEE" : "APPROVED"} /></TableCell>
@@ -838,7 +834,9 @@ export function MerchantOpportunities() {
 export function MerchantSettings() {
   const { shop, reload } = useMerchant();
   const [coef, setCoef] = useState(shop.coefficients || { partner: 0.5, professional: 0.5, enterprise: 0.5 });
+  const [prov, setProv] = useState({ provider: shop.payment_provider || "MONITY_WORLD", account: shop.payment_config?.account || "", api_key: shop.payment_config?.api_key || "" });
   const save = async () => { try { await api.put(`/shops/${shop.id}/coefficients`, { partner: Number(coef.partner), professional: Number(coef.professional), enterprise: Number(coef.enterprise) }); toast.success("Coefficients enregistrés"); reload(); } catch (e) { toast.error(apiErr(e)); } };
+  const savePayment = async () => { try { await api.put(`/shops/${shop.id}/payment`, prov); toast.success("Paiement enregistré"); reload(); } catch (e) { toast.error(apiErr(e)); } };
   return (
     <div>
       <PageHeader title="Paramètres" subtitle="Boutique & coefficients de recette" />
@@ -856,6 +854,27 @@ export function MerchantSettings() {
             <div key={k} className="mb-3"><Label>{l}</Label><Input type="number" step="0.1" min="0" max="1" value={coef[k]} onChange={(e) => setCoef({ ...coef, [k]: e.target.value })} className="mt-1" data-testid={`coef-${k}`} /></div>
           ))}
           <Button className="rounded-full mt-2" onClick={save} data-testid="save-coefficients">Enregistrer</Button>
+        </div>
+        <div className="bg-card border border-border rounded-xl p-5 lg:col-span-2">
+          <h3 className="font-display font-bold mb-1">Système de paiement</h3>
+          <p className="text-xs text-muted-foreground mb-4">Chaque boutique peut intégrer son API de paiement. Priorité au système par défaut <strong>Monity World</strong>.</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <Label>Fournisseur</Label>
+              <Select value={prov.provider} onValueChange={(v) => setProv({ ...prov, provider: v })}>
+                <SelectTrigger className="mt-1" data-testid="payment-provider"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="MONITY_WORLD">Monity World (par défaut)</SelectItem>
+                  <SelectItem value="MOBILE_MONEY">Mobile Money</SelectItem>
+                  <SelectItem value="STRIPE">Carte bancaire</SelectItem>
+                  <SelectItem value="BANK_TRANSFER">Virement bancaire</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div><Label>Compte / N°</Label><Input value={prov.account} onChange={(e) => setProv({ ...prov, account: e.target.value })} className="mt-1" placeholder="Ex: +221..." /></div>
+            <div><Label>Clé API</Label><Input value={prov.api_key} onChange={(e) => setProv({ ...prov, api_key: e.target.value })} className="mt-1" placeholder="(optionnel)" /></div>
+          </div>
+          <Button className="rounded-full mt-3" onClick={savePayment} data-testid="save-payment">Enregistrer le paiement</Button>
         </div>
       </div>
     </div>

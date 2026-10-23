@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { CrossBorderSettings } from "@/components/CrossBorderSettings";
+import { AdminCountryApis } from "@/components/AdminCountryApis";
 import api, { apiErr, downloadFile } from "@/lib/api";
 import { money } from "@/lib/currency";
 import { useI18n } from "@/lib/i18n";
@@ -15,7 +17,8 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { ApiProvidersTab, TemplatesTab, AUTH_AUDIENCE, BUSINESS_AUDIENCES } from "@/components/CommSettings";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -28,7 +31,7 @@ import {
 import {
   Home, Store, Users, ShoppingCart, Banknote, Globe, FileText, TrendingUp, Package,
   CheckCircle2, XCircle, ShieldCheck, ShieldAlert, UserCog, ScrollText, Trash2, KeyRound, Truck, Clock,
-  BarChart3, Download, Calendar as CalendarIcon, Trophy, Plus, Tag,
+  BarChart3, Download, Calendar as CalendarIcon, Trophy, MapPin, FolderTree, UserX, User as UserIcon,
 } from "lucide-react";
 
 const ROLE_LABELS = {
@@ -49,8 +52,10 @@ export function AdminLayout() {
     { to: "/admin", label: t("dashboard"), icon: Home, testid: "overview", show: can("overview") },
     { to: "/admin/shops", label: t("shops"), icon: Store, testid: "shops", show: can("shops") },
     { to: "/admin/products", label: "Modération produits", icon: Package, testid: "products", show: can("products") },
+    { to: "/admin/categories", label: "Catégories", icon: FolderTree, testid: "categories", show: can("products") },
     { to: "/admin/reports", label: "Signalements", icon: ShieldAlert, testid: "reports", show: can("moderation") },
     { to: "/admin/users", label: t("users"), icon: Users, testid: "users", show: can("users") },
+    { to: "/admin/account-deletions", label: "Suppressions de comptes", icon: UserX, testid: "account-deletions", show: isAdminLevel },
     { to: "/admin/orders", label: t("orders"), icon: ShoppingCart, testid: "orders", show: can("orders") },
     { to: "/admin/reporting", label: "Reporting ventes", icon: BarChart3, testid: "reporting", show: can("reporting") },
     { to: "/admin/withdrawals", label: t("withdrawals"), icon: Banknote, testid: "withdrawals", show: can("finance") },
@@ -58,13 +63,14 @@ export function AdminLayout() {
     { to: "/admin/earnings", label: "Validation gains", icon: CheckCircle2, testid: "earnings", show: can("finance") },
     { to: "/admin/approvals", label: "Validations", icon: ShieldAlert, testid: "approvals", show: isAdminLevel },
     { to: "/admin/staff", label: "Gestionnaires", icon: UserCog, testid: "staff", show: isSuper },
-    { to: "/admin/security", label: "Sécurité & 2FA", icon: KeyRound, testid: "security", show: can("settings") },
+    { to: "/admin/security", label: "Authentification & information", icon: KeyRound, testid: "security", show: can("settings") },
     { to: "/admin/journal", label: "Journal connexions", icon: ScrollText, testid: "journal", show: can("audit") },
-    { to: "/admin/countries", label: t("countries_currencies"), icon: Globe, testid: "countries", show: can("settings") },
-    { to: "/admin/categories", label: "Catégories", icon: Tag, testid: "categories", show: can("settings") },
+    { to: "/admin/countries", label: t("countries_currencies"), icon: Globe, testid: "countries", show: can("settings") || can("finance") },
     { to: "/admin/settings-global", label: "Paramétrage global", icon: FileText, testid: "settings-global", show: can("settings") },
     { to: "/admin/carriers", label: "Transporteurs", icon: Truck, testid: "carriers", show: can("settings") },
+    { to: "/admin/logistics", label: "Réseau logistique", icon: MapPin, testid: "logistics", show: can("settings") },
     { to: "/admin/audit", label: t("audit_log"), icon: FileText, testid: "audit", show: can("audit") },
+    { to: "/admin/account", label: "Mon compte", icon: UserIcon, testid: "account", show: true },
   ];
   const nav = allNav.filter((n) => n.show);
   return <DashboardShell nav={nav} title={isSuper ? "Super Admin" : ROLE_LABELS[user?.role] || "Admin"} subtitle="AfriMarket" />;
@@ -119,6 +125,7 @@ export function AdminOverview() {
     </div>
   );
 }
+
 const fmtLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const presetRange = (kind) => {
   const now = new Date();
@@ -320,7 +327,6 @@ export function AdminShops() {
   const [quota, setQuota] = useState("");
   const [storage, setStorage] = useState("");
   const [suspendReason, setSuspendReason] = useState("");
-  const [allowPersonalApi, setAllowPersonalApi] = useState(false);
 
   const load = () => api.get("/admin/shops").then((r) => setShops(r.data.shops)).catch(() => setShops([]));
   useEffect(() => { load(); }, []);
@@ -331,7 +337,6 @@ export function AdminShops() {
     setComm(data.shop.commission_rate == null ? "" : String(data.shop.commission_rate * 100));
     setQuota(data.shop.product_quota == null ? "" : String(data.shop.product_quota));
     setStorage(data.shop.storage_quota_mb == null ? "" : String(data.shop.storage_quota_mb));
-    setAllowPersonalApi(data.shop.allow_personal_api || false);
     setSuspendReason("");
   };
   const approve = async (id) => { await api.put(`/admin/shops/${id}/approve`); toast.success("Boutique approuvée"); setDetail(null); load(); };
@@ -342,15 +347,6 @@ export function AdminShops() {
   };
   const saveQuota = async (id) => {
     try { await api.put(`/admin/shops/${id}/quota`, { product_quota: parseInt(quota || "0", 10), storage_quota_mb: parseInt(storage || "0", 10) }); toast.success("Quotas mis à jour"); openDetail({ id }); load(); } catch (e) { toast.error(apiErr(e)); }
-  };
-  const togglePersonalApi = async (id) => {
-    try { 
-      await api.put(`/admin/shops/${id}/personal-api`, { allow_personal_api: !allowPersonalApi }); 
-      toast.success(`API personnalisée ${!allowPersonalApi ? "autorisée" : "désautorisée"}`); 
-      setAllowPersonalApi(!allowPersonalApi);
-      openDetail({ id }); 
-      load(); 
-    } catch (e) { toast.error(apiErr(e)); }
   };
   const suspend = async (id) => { try { await api.put(`/admin/shops/${id}/suspend`, { reason: suspendReason }); toast.success("Boutique suspendue"); openDetail({ id }); load(); } catch (e) { toast.error(apiErr(e)); } };
   const reactivate = async (id) => { try { await api.put(`/admin/shops/${id}/reactivate`); toast.success("Boutique réactivée"); openDetail({ id }); load(); } catch (e) { toast.error(apiErr(e)); } };
@@ -443,16 +439,6 @@ export function AdminShops() {
                   </div>
                   <div className="text-xs text-muted-foreground">Produits : {detail.shop.product_count ?? "—"}{detail.shop.product_quota ? ` / ${detail.shop.product_quota}` : ""} · Stockage : {detail.shop.storage_used_mb ?? 0} Mo{detail.shop.storage_quota_mb ? ` / ${detail.shop.storage_quota_mb} Mo` : ""}</div>
 
-                  <div className="border-t border-border pt-3 mt-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <Label className="text-sm font-semibold block mb-1">API personnalisée du vendeur</Label>
-                        <p className="text-xs text-muted-foreground">Autoriser ce vendeur à configurer son propre API de paiement</p>
-                      </div>
-                      <Switch checked={allowPersonalApi} onCheckedChange={() => togglePersonalApi(detail.shop.id)} data-testid="toggle-personal-api" />
-                    </div>
-                  </div>
-
                   {detail.shop.suspended ? (
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-amber-700">Boutique suspendue : {detail.shop.suspension_reason || "—"}</span>
@@ -490,30 +476,72 @@ export function AdminShops() {
   );
 }
 
+const USER_GROUPS = [
+  ["CLIENT", "Clients", (u) => u.role === "CLIENT"],
+  ["MERCHANT", "Boutiques", (u) => u.role === "MERCHANT"],
+  ["CARRIER_AGENT", "Transporteurs", (u) => u.role === "CARRIER_AGENT"],
+  ["RELAY_MANAGER", "Points relais", (u) => u.role === "RELAY_MANAGER"],
+  ["STAFF", "Administration", (u) => !["CLIENT", "MERCHANT", "CARRIER_AGENT", "RELAY_MANAGER"].includes(u.role)],
+];
+
+function OnlineDot({ u }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs" data-testid={`user-online-${u.id}`} title={u.last_seen ? `Dernière activité : ${new Date(u.last_seen).toLocaleString("fr-FR")}` : "Jamais vu"}>
+      <span className={`w-2 h-2 rounded-full ${u.online ? "bg-green-500 ring-4 ring-green-500/20" : "bg-gray-300"}`} />
+      {u.online ? "Connecté" : "Déconnecté"}
+    </span>
+  );
+}
+
 export function AdminUsers() {
   const { user: me } = useAuth();
   const [users, setUsers] = useState(null);
+  const [group, setGroup] = useState("CLIENT");
+  const [q, setQ] = useState("");
+  const [onlyOnline, setOnlyOnline] = useState(false);
   const adminLevel = me?.role === "SUPER_ADMIN" || me?.role === "ADMIN";
   const load = () => api.get("/admin/users").then((r) => setUsers(r.data.users)).catch(() => setUsers([]));
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); const iv = setInterval(load, 60000); return () => clearInterval(iv); }, []);
   const delMerchant = async (u) => {
     if (!window.confirm(`Demander la suppression du vendeur ${u.email} ? Cette action requiert une seconde validation administrateur.`)) return;
     try { const { data } = await api.delete(`/admin/merchants/${u.id}`); toast.success(data.message); load(); }
     catch (e) { toast.error(apiErr(e)); }
   };
   if (users === null) return <Loading />;
+  const test = USER_GROUPS.find((g) => g[0] === group)[2];
+  const term = q.trim().toLowerCase();
+  const rows = users.filter(test).filter((u) => !onlyOnline || u.online)
+    .filter((u) => !term || `${u.name} ${u.email} ${u.country || ""}`.toLowerCase().includes(term));
+  const online = users.filter((u) => u.online).length;
   return (
     <div>
-      <PageHeader title="Utilisateurs" subtitle={`${users.length} compte(s)`} />
+      <PageHeader title="Utilisateurs" subtitle={`${users.length} compte(s) · ${online} connecté(s) maintenant`} />
+      <div className="flex flex-wrap gap-2 mb-4">
+        {USER_GROUPS.map(([k, l, fn]) => {
+          const list = users.filter(fn);
+          return (
+            <button key={k} type="button" onClick={() => setGroup(k)} data-testid={`users-group-${k}`}
+              className={`text-sm px-3 py-1.5 rounded-full border transition-colors ${group === k ? "bg-primary text-primary-foreground border-primary" : "border-border hover:bg-accent"}`}>
+              {l} <span className="opacity-70">{list.length}</span> <span className="text-[11px]">· {list.filter((u) => u.online).length} en ligne</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-3 mb-3">
+        <Input className="max-w-xs" placeholder="Rechercher nom, e-mail, pays" value={q} onChange={(e) => setQ(e.target.value)} data-testid="users-search" />
+        <label className="flex items-center gap-2 text-sm"><Switch checked={onlyOnline} onCheckedChange={setOnlyOnline} data-testid="users-only-online" /> Connectés uniquement</label>
+      </div>
       <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
         <Table>
-          <TableHeader><TableRow><TableHead>Nom</TableHead><TableHead>E-mail</TableHead><TableHead>Rôle</TableHead><TableHead>Statut</TableHead><TableHead>Pays</TableHead><TableHead>KYC</TableHead><TableHead></TableHead></TableRow></TableHeader>
+          <TableHeader><TableRow><TableHead>Nom</TableHead><TableHead>E-mail</TableHead><TableHead>Rôle</TableHead><TableHead>Connexion</TableHead><TableHead>Statut</TableHead><TableHead>Pays</TableHead><TableHead>KYC</TableHead><TableHead></TableHead></TableRow></TableHeader>
           <TableBody>
-            {users.map((u) => (
+            {rows.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-sm text-muted-foreground" data-testid="users-empty">Aucun utilisateur dans ce groupe.</TableCell></TableRow>}
+            {rows.map((u) => (
               <TableRow key={u.id} data-testid={`admin-user-${u.id}`}>
                 <TableCell className="font-medium text-sm">{u.name} {u.is_demo && <span className="text-[10px] bg-muted px-1 rounded">DEMO</span>}</TableCell>
                 <TableCell className="text-sm">{u.email}</TableCell>
                 <TableCell><span className="text-xs font-mono bg-accent px-2 py-0.5 rounded-full">{u.role}</span></TableCell>
+                <TableCell><OnlineDot u={u} /></TableCell>
                 <TableCell><StatusBadge status={u.status || "ACTIVE"} /></TableCell>
                 <TableCell className="text-sm">{u.country || "—"}</TableCell>
                 <TableCell>{u.role === "MERCHANT" ? <StatusBadge status={u.kyc_status} /> : "—"}</TableCell>
@@ -544,6 +572,11 @@ export function AdminOrders() {
     api.get("/admin/orders", { params }).then((r) => setData(r.data)).catch(() => setData({ orders: [], late_count: 0 }));
   };
   useEffect(() => { load(); }, [f]);
+  const cancelOrder = async (o) => {
+    if (!window.confirm(`Annuler la commande ${o.ref} et rembourser le client sur son solde ?`)) return;
+    try { const { data } = await api.post(`/orders/${o.id}/cancel`); toast.success(data.message); load(); }
+    catch (e) { toast.error(apiErr(e)); }
+  };
   useEffect(() => {
     api.get("/admin/shops").then((r) => setShops(r.data.shops)).catch(() => {});
     api.get("/carriers").then((r) => setCarriers(r.data.carriers)).catch(() => {});
@@ -589,7 +622,8 @@ export function AdminOrders() {
                 <TableCell className="text-xs">{o.carrier_name || "—"}</TableCell>
                 <TableCell className="text-right font-mono">{money(o.total, o.currency)}</TableCell>
                 <TableCell><StatusBadge status={o.status} /></TableCell>
-                <TableCell>{o.carrier_id && <Button size="sm" variant="ghost" className="rounded-full text-xs h-7" onClick={() => downloadFile(`/orders/${o.id}/label`, `Etiquette-${o.ref}.pdf`)} data-testid={`label-${o.ref}`}><FileText className="w-3.5 h-3.5 mr-1" /> Étiquette</Button>}</TableCell>
+                <TableCell>{o.carrier_id && <Button size="sm" variant="ghost" className="rounded-full text-xs h-7" onClick={() => downloadFile(`/orders/${o.id}/label`, `Etiquette-${o.ref}.pdf`)} data-testid={`label-${o.ref}`}><FileText className="w-3.5 h-3.5 mr-1" /> Étiquette</Button>}
+                  {["NOUVELLE", "EN_ATTENTE", "APPROUVEE", "EN_PREPARATION", "PRETE"].includes(o.status) && <Button size="sm" variant="ghost" className="rounded-full text-xs h-7 text-destructive" onClick={() => cancelOrder(o)} data-testid={`admin-cancel-${o.ref}`}>Annuler</Button>}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -653,141 +687,23 @@ export function AdminWithdrawals() {
 export function AdminCountries() {
   const [countries, setCountries] = useState([]);
   const [currencies, setCurrencies] = useState([]);
-  const [paymentApis, setPaymentApis] = useState([]);
-  const [paymentForm, setPaymentForm] = useState({ country: "", name: "", provider: "", api_key: "", account: "" });
-  const [adminCountries, setAdminCountries] = useState([]);
   useEffect(() => {
-    api.get("/admin/countries").then((r) => setAdminCountries(r.data.countries)).catch(() => {});
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
     api.get("/config/currencies").then((r) => setCurrencies(r.data.currencies)).catch(() => {});
-    api.get("/admin/payment-apis").then((r) => setPaymentApis(r.data.payment_apis)).catch(() => {});
   }, []);
-  const reloadCountries = () => api.get("/admin/countries").then((r) => setAdminCountries(r.data.countries));
-  const selectedPaymentApiCount = paymentApis.filter((item) => item.country === paymentForm.country).length;
-  const reloadPaymentApis = () => api.get("/admin/payment-apis").then((r) => setPaymentApis(r.data.payment_apis));
-  const toggleCountryActivation = async (countryName, currentActive) => {
-    try {
-      await api.put(`/admin/countries/${countryName}/toggle`, { active: !currentActive });
-      toast.success(`Pays ${!currentActive ? 'activé' : 'désactivé'}`);
-      await reloadCountries();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-  const addPaymentApi = async () => {
-    if (!paymentForm.country || !paymentForm.name.trim() || !paymentForm.provider.trim() || !paymentForm.api_key.trim()) {
-      toast.error("Pays, nom, fournisseur et clé API sont requis");
-      return;
-    }
-    try {
-      await api.post("/admin/payment-apis", paymentForm);
-      toast.success("API de paiement ajoutée");
-      setPaymentForm({ country: paymentForm.country, name: "", provider: "", api_key: "", account: "" });
-      await reloadPaymentApis();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-  const patchPaymentApi = async (item, patch) => {
-    try { await api.put(`/admin/payment-apis/${item.id}`, patch); await reloadPaymentApis(); toast.success("API de paiement mise à jour"); }
-    catch (e) { toast.error(apiErr(e)); }
-  };
-  const editPaymentApi = async (item) => {
-    const name = window.prompt("Nom de l'API :", item.name);
-    if (name === null) return;
-    const provider = window.prompt("Code fournisseur :", item.provider);
-    if (provider === null) return;
-    const account = window.prompt("Compte / identifiant (laisser vide si non utilisé) :", item.account || "");
-    if (account === null) return;
-    await patchPaymentApi(item, { name, provider, account });
-  };
-  const rotatePaymentApiKey = async (item) => {
-    const apiKey = window.prompt(`Nouvelle clé API pour ${item.name} :`, "");
-    if (apiKey === null) return;
-    if (!apiKey.trim()) {
-      toast.error("La clé API est requise");
-      return;
-    }
-    await patchPaymentApi(item, { api_key: apiKey });
-  };
-  const deletePaymentApi = async (item) => {
-    if (!window.confirm(`Supprimer l'API ${item.name} ?`)) return;
-    try { await api.delete(`/admin/payment-apis/${item.id}`); toast.success("API de paiement supprimée"); await reloadPaymentApis(); }
-    catch (e) { toast.error(apiErr(e)); }
-  };
   return (
     <div>
-      <PageHeader title="Pays & Devises" subtitle={`${adminCountries.length} pays · ${currencies.length} devises`} />
-      <div className="bg-card border border-border rounded-xl overflow-hidden mb-6">
-        <div className="px-4 py-3 font-display font-bold border-b border-border">Gestion des Pays</div>
-        <p className="text-xs text-muted-foreground px-4 py-3">Désactiver un pays masquera toutes ses boutiques en ligne et les marquera comme brouillon. Les clients ne pourront pas accéder aux produits de ce pays.</p>
-        <div className="max-h-[400px] overflow-y-auto">
-          <Table>
-            <TableHeader><TableRow><TableHead>Pays</TableHead><TableHead>ISO</TableHead><TableHead>Devise</TableHead><TableHead>Statut</TableHead><TableHead>Action</TableHead></TableRow></TableHeader>
-            <TableBody>{adminCountries.map((c) => (<TableRow key={c.name}><TableCell className="text-sm font-medium">{c.name}</TableCell><TableCell className="font-mono text-sm">{c.iso2}</TableCell><TableCell className="font-mono text-sm">{c.currency}</TableCell><TableCell>{c.active ? <Badge className="bg-green-600">Actif</Badge> : <Badge variant="secondary">Inactif</Badge>}</TableCell><TableCell><Switch checked={c.active} onCheckedChange={() => toggleCountryActivation(c.name, c.active)} data-testid={`toggle-country-${c.name}`} /></TableCell></TableRow>))}</TableBody>
-            </Table>
-        </div>
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <PageHeader title="Pays & Devises" subtitle={`${countries.length} pays · ${currencies.length} devises`} />
+      <AdminCountryApis />
+      <div className="mt-6">
         <div className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="px-4 py-3 font-display font-bold border-b border-border">Devises</div>
-          <div className="max-h-[500px] overflow-y-auto">
+          <div className="max-h-[400px] overflow-y-auto">
             <Table>
               <TableHeader><TableRow><TableHead>Code</TableHead><TableHead>Nom</TableHead><TableHead>Symbole</TableHead></TableRow></TableHeader>
               <TableBody>{currencies.map((c) => (<TableRow key={c.code}><TableCell className="font-mono font-semibold">{c.code}</TableCell><TableCell className="text-sm">{c.name}</TableCell><TableCell>{c.symbol}</TableCell></TableRow>))}</TableBody>
             </Table>
           </div>
-        </div>
-        <div className="bg-card border border-border rounded-xl overflow-hidden">
-          <div className="px-4 py-3 font-display font-bold border-b border-border">Pays (Actifs uniquement)</div>
-          <div className="max-h-[500px] overflow-y-auto">
-            <Table>
-              <TableHeader><TableRow><TableHead>Pays</TableHead><TableHead>Devise</TableHead></TableRow></TableHeader>
-              <TableBody>{countries.map((c) => (<TableRow key={c.name}><TableCell className="text-sm">{c.name}</TableCell><TableCell className="font-mono text-sm">{c.currency}</TableCell></TableRow>))}</TableBody>
-            </Table>
-          </div>
-        </div>
-      </div>
-      <div className="bg-card border border-border rounded-xl p-5 mt-6">
-        <h3 className="font-display font-bold">API de paiement par pays</h3>
-        <p className="text-xs text-muted-foreground mt-1 mb-4">Seuls les administrateurs gèrent les API de transaction. Maximum 10 API par pays; les clés ne sont jamais réaffichées.</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
-          <div>
-            <Label>Pays</Label>
-            <Select value={paymentForm.country} onValueChange={(country) => setPaymentForm({ ...paymentForm, country })}>
-              <SelectTrigger className="mt-1" data-testid="payment-api-country"><SelectValue placeholder="Choisir" /></SelectTrigger>
-              <SelectContent>{countries.map((country) => <SelectItem key={country.name} value={country.name}>{country.name}</SelectItem>)}</SelectContent>
-            </Select>
-          </div>
-          <div><Label>Nom</Label><Input value={paymentForm.name} onChange={(e) => setPaymentForm({ ...paymentForm, name: e.target.value })} placeholder="MTN Cameroun" className="mt-1" data-testid="payment-api-name" /></div>
-          <div><Label>Fournisseur</Label><Input value={paymentForm.provider} onChange={(e) => setPaymentForm({ ...paymentForm, provider: e.target.value })} placeholder="MTN_MOMO" className="mt-1" data-testid="payment-api-provider" /></div>
-          <div><Label>Compte / identifiant</Label><Input value={paymentForm.account} onChange={(e) => setPaymentForm({ ...paymentForm, account: e.target.value })} placeholder="Optionnel" className="mt-1" data-testid="payment-api-account" /></div>
-          <div><Label>Clé API</Label><Input type="password" value={paymentForm.api_key} onChange={(e) => setPaymentForm({ ...paymentForm, api_key: e.target.value })} className="mt-1" data-testid="payment-api-key" /></div>
-        </div>
-        <div className="flex items-center justify-between mt-3">
-          <span className="text-xs text-muted-foreground">{paymentForm.country ? `${selectedPaymentApiCount}/10 API configurée(s) pour ${paymentForm.country}` : "Sélectionnez un pays"}</span>
-          <Button className="rounded-full" onClick={addPaymentApi} disabled={!paymentForm.country || selectedPaymentApiCount >= 10} data-testid="add-payment-api"><Plus className="w-4 h-4 mr-1" /> Ajouter l'API</Button>
-        </div>
-        <div className="border border-border rounded-lg overflow-hidden mt-5 overflow-x-auto">
-          <Table>
-            <TableHeader><TableRow><TableHead>Pays</TableHead><TableHead>Nom</TableHead><TableHead>Fournisseur</TableHead><TableHead>Compte</TableHead><TableHead>Clé</TableHead><TableHead>Active</TableHead><TableHead>Actions</TableHead></TableRow></TableHeader>
-            <TableBody>
-              {paymentApis.length === 0 && <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">Aucune API de paiement configurée</TableCell></TableRow>}
-              {paymentApis.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell className="text-sm">{item.country}</TableCell>
-                  <TableCell className="font-medium text-sm">{item.name}</TableCell>
-                  <TableCell className="font-mono text-xs">{item.provider}</TableCell>
-                  <TableCell className="text-xs">{item.account || "—"}</TableCell>
-                  <TableCell className="text-xs">{item.api_key_configured ? "Configurée" : "—"}</TableCell>
-                  <TableCell><Switch checked={item.active} onCheckedChange={(active) => patchPaymentApi(item, { active })} data-testid={`payment-api-active-${item.id}`} /></TableCell>
-                  <TableCell>
-                    <div className="flex items-center justify-end gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => editPaymentApi(item)} data-testid={`payment-api-edit-${item.id}`}>Modifier</Button>
-                      <Button size="sm" variant="ghost" onClick={() => rotatePaymentApiKey(item)} data-testid={`payment-api-rotate-${item.id}`}><KeyRound className="w-4 h-4" /></Button>
-                      <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deletePaymentApi(item)} data-testid={`payment-api-delete-${item.id}`}><Trash2 className="w-4 h-4" /></Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
         </div>
       </div>
     </div>
@@ -795,6 +711,18 @@ export function AdminCountries() {
 }
 
 export function AdminGlobalSettings() {
+  const { user: me } = useAuth();
+  const [exportUrl, setExportUrl] = useState("");
+  const [exportExp, setExportExp] = useState("");
+  const genExportLink = async () => {
+    try {
+      const { data } = await api.post("/admin/export/link");
+      const full = `${process.env.REACT_APP_BACKEND_URL}${data.url}`;
+      setExportUrl(full); setExportExp(data.expires_at);
+      if (navigator.clipboard) navigator.clipboard.writeText(full).catch(() => {});
+      toast.success("Lien sécurisé généré (valable 30 min) et copié");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
   const LEGAL = [
     { key: "terms", label: "Conditions générales (CGU/CGV)" },
     { key: "privacy", label: "Politique de confidentialité" },
@@ -849,6 +777,20 @@ export function AdminGlobalSettings() {
     <div>
       <PageHeader title="Paramétrage global" subtitle="Contenu légal & taxes par pays / zone" />
       <div className="space-y-6">
+        {/* Secure application export (super-admin only) */}
+        {me?.role === "SUPER_ADMIN" && (
+          <div className="bg-card border border-border rounded-xl p-5" data-testid="export-app-card">
+            <h3 className="font-display font-bold mb-2 flex items-center gap-2"><Download className="w-4 h-4 text-primary" /> Export de l'application</h3>
+            <p className="text-xs text-muted-foreground mb-3">Génère un lien de téléchargement <strong>sécurisé et temporaire</strong> (valable 30 min) de l'archive complète (code + configuration + dump base de données). Le lien public direct a été supprimé.</p>
+            <Button className="rounded-full" onClick={genExportLink} data-testid="gen-export-link"><Download className="w-4 h-4 mr-2" /> Générer un lien sécurisé</Button>
+            {exportUrl && (
+              <div className="mt-3 p-3 bg-muted/50 rounded-lg" data-testid="export-link-box">
+                <div className="text-xs text-muted-foreground mb-1">Lien (copié) — expire le {new Date(exportExp).toLocaleString("fr-FR")} :</div>
+                <a href={exportUrl} className="text-xs text-primary break-all underline" data-testid="export-link-url">{exportUrl}</a>
+              </div>
+            )}
+          </div>
+        )}
         {/* Merchant features */}
         <div className="bg-card border border-border rounded-xl p-5" data-testid="merchant-features">
           <h3 className="font-display font-bold mb-3 flex items-center gap-2"><Package className="w-4 h-4 text-primary" /> Fonctionnalités commerçant</h3>
@@ -876,6 +818,7 @@ export function AdminGlobalSettings() {
         </div>
 
         {/* Taxes */}
+        <CrossBorderSettings countries={countries} />
         <div className="bg-card border border-border rounded-xl p-5" data-testid="taxes-editor">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <h3 className="font-display font-bold flex items-center gap-2"><Banknote className="w-4 h-4 text-primary" /> Taxes par pays / zone</h3>
@@ -953,30 +896,21 @@ export function AdminAudit() {
 
 
 // ---------------- Module 9: Gestionnaires (RBAC) ----------------
-const emptyStaff = {
-  name: "", email: "", password: "", phone: "", phone_verification_id: "",
-  role: "MODERATOR", permissions: {}, country_scopes: [], shop_ids: [],
-};
+const emptyStaff = { name: "", email: "", password: "", role: "MODERATOR", permissions: {}, shop_ids: [] };
 
 export function AdminStaff() {
   const [staff, setStaff] = useState(null);
   const [meta, setMeta] = useState(null);
   const [shops, setShops] = useState([]);
-  const [countries, setCountries] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyStaff);
-  const [otpCode, setOtpCode] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [phoneVerified, setPhoneVerified] = useState(false);
-  const [otpLoading, setOtpLoading] = useState(false);
 
   const load = () => api.get("/admin/staff").then((r) => setStaff(r.data.staff)).catch(() => setStaff([]));
   useEffect(() => {
     load();
     api.get("/admin/rbac/meta").then((r) => setMeta(r.data)).catch(() => {});
     api.get("/admin/shops").then((r) => setShops(r.data.shops)).catch(() => {});
-    api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
   }, []);
 
   const modules = meta?.modules || [];
@@ -985,16 +919,13 @@ export function AdminStaff() {
   const openCreate = () => {
     const defaults = {};
     (meta?.default_permissions?.MODERATOR || []).forEach((m) => { defaults[m] = true; });
-    setEditing(null); setForm({ ...emptyStaff, permissions: defaults });
-    setOtpCode(""); setOtpSent(false); setPhoneVerified(false); setOpen(true);
+    setEditing(null); setForm({ ...emptyStaff, permissions: defaults }); setOpen(true);
   };
   const openEdit = (s) => {
     const perms = {}; modules.forEach((m) => { perms[m.key] = (s.permissions || []).includes(m.key); });
     setEditing(s);
-    setForm({ name: s.name, email: s.email, phone: s.phone || "", password: "", role: s.role, permissions: perms,
-      country_scopes: s.country_scopes || (s.country ? [s.country] : []), shop_ids: s.shop_ids || [],
+    setForm({ name: s.name, email: s.email, password: "", role: s.role, permissions: perms, shop_ids: s.shop_ids || [],
       status: s.status, delegation: s.delegation || { enabled: false } });
-    setOtpCode(""); setOtpSent(false); setPhoneVerified(true);
     setOpen(true);
   };
   const setRoleDefaults = (role) => {
@@ -1003,60 +934,18 @@ export function AdminStaff() {
   };
   const togglePerm = (k) => setForm((f) => ({ ...f, permissions: { ...f.permissions, [k]: !f.permissions[k] } }));
   const toggleShop = (id) => setForm((f) => ({ ...f, shop_ids: f.shop_ids.includes(id) ? f.shop_ids.filter((x) => x !== id) : [...f.shop_ids, id] }));
-  const toggleCountry = (country) => setForm((f) => {
-    const country_scopes = f.country_scopes.includes(country)
-      ? f.country_scopes.filter((item) => item !== country)
-      : [...f.country_scopes, country];
-    const shop_ids = f.shop_ids.filter((id) => {
-      const shop = shops.find((item) => item.id === id);
-      return shop && country_scopes.includes(shop.country);
-    });
-    return { ...f, country_scopes, shop_ids };
-  });
-  const eligibleShops = shops.filter((shop) => form.country_scopes.includes(shop.country));
-
-  const sendPhoneOtp = async () => {
-    if (!form.phone.trim()) { toast.error("Saisissez un numéro de téléphone international"); return; }
-    setOtpLoading(true);
-    try {
-      const { data } = await api.post("/admin/staff/phone-otp", { phone: form.phone });
-      setForm((f) => ({ ...f, phone_verification_id: data.verification_id }));
-      setOtpSent(true);
-      toast.info(data.demo_otp ? `Code OTP (simulation) : ${data.demo_otp}` : data.message);
-    } catch (e) { toast.error(apiErr(e)); }
-    finally { setOtpLoading(false); }
-  };
-
-  const verifyPhoneOtp = async () => {
-    if (!otpCode.trim()) { toast.error("Saisissez le code OTP"); return; }
-    setOtpLoading(true);
-    try {
-      await api.post("/admin/staff/phone-otp/verify", {
-        verification_id: form.phone_verification_id,
-        code: otpCode,
-      });
-      setPhoneVerified(true);
-      toast.success("Téléphone vérifié");
-    } catch (e) { toast.error(apiErr(e)); }
-    finally { setOtpLoading(false); }
-  };
 
   const save = async () => {
     try {
       if (editing) {
         await api.put(`/admin/staff/${editing.id}`, {
-          role: form.role, permissions: form.permissions, country_scopes: form.country_scopes, shop_ids: form.shop_ids,
+          role: form.role, permissions: form.permissions, shop_ids: form.shop_ids,
           status: form.status, delegation: form.delegation, password: form.password || undefined,
         });
         toast.success("Gestionnaire mis à jour");
       } else {
-        if (!phoneVerified) { toast.error("Vérifiez le téléphone avant de créer le compte"); return; }
-        await api.post("/admin/staff", {
-          name: form.name, email: form.email, password: form.password, phone: form.phone,
-          phone_verification_id: form.phone_verification_id, role: form.role,
-          country_scopes: form.country_scopes, permissions: form.permissions, shop_ids: form.shop_ids,
-        });
-        toast.success("Gestionnaire créé. Une vérification e-mail est en attente.");
+        await api.post("/admin/staff", { name: form.name, email: form.email, password: form.password, role: form.role, permissions: form.permissions, shop_ids: form.shop_ids });
+        toast.success("Gestionnaire créé");
       }
       setOpen(false); load();
     } catch (e) { toast.error(apiErr(e)); }
@@ -1102,50 +991,16 @@ export function AdminStaff() {
           <DialogHeader><DialogTitle>{editing ? "Modifier le gestionnaire" : "Nouveau gestionnaire"}</DialogTitle></DialogHeader>
           <div className="space-y-4">
             {!editing && (
-              <>
+              <div className="grid grid-cols-2 gap-3">
                 <div><Label>Nom</Label><Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} data-testid="staff-name" className="mt-1" /></div>
-                <div>
-                  <Label className="mb-2 block">Pays d'accès</Label>
-                  <p className="text-xs text-muted-foreground mb-2">Les permissions et boutiques seront limitées à ces pays.</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3 max-h-44 overflow-y-auto">
-                    {countries.map((country) => (
-                      <label key={country.name} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox checked={form.country_scopes.includes(country.name)} onCheckedChange={() => toggleCountry(country.name)} data-testid={`staff-country-${country.iso2}`} />
-                        {country.name}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="border border-border rounded-lg p-3 space-y-3">
-                  <Label>Numéro de téléphone à vérifier</Label>
-                  <div className="flex gap-2">
-                    <Input value={form.phone} disabled={phoneVerified} onChange={(e) => {
-                      setForm((f) => ({ ...f, phone: e.target.value, phone_verification_id: "" }));
-                      setOtpCode(""); setOtpSent(false);
-                    }} placeholder="+221..." data-testid="staff-phone" />
-                    <Button type="button" variant="outline" disabled={otpLoading || phoneVerified} onClick={sendPhoneOtp} data-testid="staff-send-phone-otp">Envoyer OTP</Button>
-                  </div>
-                  {otpSent && !phoneVerified && (
-                    <div className="flex gap-2">
-                      <Input value={otpCode} onChange={(e) => setOtpCode(e.target.value)} inputMode="numeric" maxLength={6} placeholder="Code OTP" data-testid="staff-phone-otp" />
-                      <Button type="button" disabled={otpLoading} onClick={verifyPhoneOtp} data-testid="staff-verify-phone-otp">Vérifier</Button>
-                    </div>
-                  )}
-                  {phoneVerified && <p className="text-xs text-green-700 flex items-center gap-1"><ShieldCheck className="w-4 h-4" /> Téléphone vérifié</p>}
-                </div>
-                {phoneVerified && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <div><Label>E-mail</Label><Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} data-testid="staff-email" className="mt-1" /></div>
-                    <div><Label>Mot de passe</Label><Input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} data-testid="staff-password" className="mt-1" /></div>
-                  </div>
-                )}
-              </>
+                <div><Label>E-mail</Label><Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} data-testid="staff-email" className="mt-1" /></div>
+              </div>
             )}
             <div className="grid grid-cols-2 gap-3">
-              {editing && <div>
+              <div>
                 <Label>{editing ? "Nouveau mot de passe (optionnel)" : "Mot de passe"}</Label>
                 <Input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} data-testid="staff-password" className="mt-1" />
-              </div>}
+              </div>
               <div>
                 <Label>Rôle</Label>
                 <Select value={form.role} onValueChange={setRoleDefaults}>
@@ -1169,19 +1024,6 @@ export function AdminStaff() {
                 </div>
               </div>
             )}
-            {editing && (
-              <div>
-                <Label className="mb-2 block">Pays d'accès</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3 max-h-44 overflow-y-auto">
-                  {countries.map((country) => (
-                    <label key={country.name} className="flex items-center gap-2 text-sm cursor-pointer">
-                      <Checkbox checked={form.country_scopes.includes(country.name)} onCheckedChange={() => toggleCountry(country.name)} data-testid={`staff-country-${country.iso2}`} />
-                      {country.name}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
             <div>
               <Label className="mb-2 block">Permissions par module (RBAC)</Label>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3">
@@ -1194,13 +1036,13 @@ export function AdminStaff() {
               </div>
             </div>
             <div>
-              <Label className="mb-2 block">Rattachement aux boutiques des pays sélectionnés (optionnel)</Label>
+              <Label className="mb-2 block">Rattachement aux boutiques (optionnel)</Label>
               <div className="grid grid-cols-2 gap-2 border border-border rounded-lg p-3 max-h-40 overflow-y-auto">
-                {eligibleShops.length === 0 && <span className="text-xs text-muted-foreground">Aucune boutique dans les pays sélectionnés</span>}
-                {eligibleShops.map((s) => (
+                {shops.length === 0 && <span className="text-xs text-muted-foreground">Aucune boutique</span>}
+                {shops.map((s) => (
                   <label key={s.id} className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox checked={form.shop_ids.includes(s.id)} onCheckedChange={() => toggleShop(s.id)} data-testid={`shop-attach-${s.id}`} />
-                    {s.name} <span className="text-xs text-muted-foreground">({s.country})</span>
+                    {s.name}
                   </label>
                 ))}
               </div>
@@ -1218,7 +1060,7 @@ export function AdminStaff() {
               )}
             </div>
           </div>
-          <DialogFooter><Button className="rounded-full" disabled={!editing && !phoneVerified} onClick={save} data-testid="save-staff">{editing ? "Enregistrer" : "Créer"}</Button></DialogFooter>
+          <DialogFooter><Button className="rounded-full" onClick={save} data-testid="save-staff">{editing ? "Enregistrer" : "Créer"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
@@ -1261,7 +1103,18 @@ export function AdminSecurity() {
 
   return (
     <div>
-      <PageHeader title="Sécurité & authentification" subtitle="2FA, canaux OTP et double-validation" />
+      <PageHeader title="Authentification & information" subtitle="Sécurité, API d'envoi et messages envoyés aux utilisateurs" />
+      <Tabs defaultValue="security">
+        <TabsList className="flex-wrap h-auto mb-4">
+          <TabsTrigger value="security" data-testid="auth-tab-security">Sécurité & 2FA</TabsTrigger>
+          {canSettings && <TabsTrigger value="apis" data-testid="auth-tab-apis">API d'envoi</TabsTrigger>}
+          {canSettings && <TabsTrigger value="auth-messages" data-testid="auth-tab-auth-messages">Messages d'authentification</TabsTrigger>}
+          {canSettings && <TabsTrigger value="business-messages" data-testid="auth-tab-business-messages">Messages clients & partenaires</TabsTrigger>}
+        </TabsList>
+        {canSettings && <TabsContent value="apis"><ApiProvidersTab /></TabsContent>}
+        {canSettings && <TabsContent value="auth-messages"><TemplatesTab audiences={AUTH_AUDIENCE} /></TabsContent>}
+        {canSettings && <TabsContent value="business-messages"><TemplatesTab audiences={BUSINESS_AUDIENCES} /></TabsContent>}
+        <TabsContent value="security">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {canSettings && s && (
           <div className="bg-card border border-border rounded-xl p-5 space-y-4" data-testid="security-settings">
@@ -1389,6 +1242,8 @@ export function AdminSecurity() {
           </div>
         </div>
       </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -1733,187 +1588,6 @@ export function AdminCarriers() {
           <DialogFooter><Button className="rounded-full" onClick={create} data-testid="save-carrier">Ajouter</Button></DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
-  );
-}
-
-export function AdminCategories() {
-  const [categories, setCategories] = useState(null);
-  const [categoryForm, setCategoryForm] = useState({ name: "", description: "" });
-  const [subcategoryForm, setSubcategoryForm] = useState({ category_id: "", name: "", description: "" });
-  const [selectedCat, setSelectedCat] = useState(null);
-  const [editingCat, setEditingCat] = useState(null);
-  const [editingSub, setEditingSub] = useState(null);
-
-  const load = () => api.get("/admin/categories").then((r) => setCategories(r.data.categories)).catch(() => setCategories([]));
-  useEffect(() => { load(); }, []);
-
-  const createCategory = async () => {
-    if (!categoryForm.name.trim()) { toast.error("Le nom est obligatoire"); return; }
-    try {
-      await api.post("/admin/categories", categoryForm);
-      toast.success("Catégorie créée");
-      setCategoryForm({ name: "", description: "" });
-      load();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-
-  const updateCategory = async (id) => {
-    if (!editingCat.name.trim()) { toast.error("Le nom est obligatoire"); return; }
-    try {
-      await api.put(`/admin/categories/${id}`, editingCat);
-      toast.success("Catégorie mise à jour");
-      setEditingCat(null);
-      load();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-
-  const deleteCategory = async (id) => {
-    if (!window.confirm("Supprimer cette catégorie ?")) return;
-    try {
-      await api.delete(`/admin/categories/${id}`);
-      toast.success("Catégorie supprimée");
-      load();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-
-  const createSubcategory = async () => {
-    if (!subcategoryForm.name.trim()) { toast.error("Le nom est obligatoire"); return; }
-    if (!subcategoryForm.category_id) { toast.error("Sélectionnez une catégorie"); return; }
-    try {
-      await api.post("/admin/subcategories", subcategoryForm);
-      toast.success("Sous-catégorie créée");
-      setSubcategoryForm({ category_id: "", name: "", description: "" });
-      load();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-
-  const updateSubcategory = async (id) => {
-    if (!editingSub.name.trim()) { toast.error("Le nom est obligatoire"); return; }
-    try {
-      await api.put(`/admin/subcategories/${id}`, editingSub);
-      toast.success("Sous-catégorie mise à jour");
-      setEditingSub(null);
-      load();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-
-  const deleteSubcategory = async (id) => {
-    if (!window.confirm("Supprimer cette sous-catégorie ?")) return;
-    try {
-      await api.delete(`/admin/subcategories/${id}`);
-      toast.success("Sous-catégorie supprimée");
-      load();
-    } catch (e) { toast.error(apiErr(e)); }
-  };
-
-  if (categories === null) return <Loading />;
-
-  return (
-    <div>
-      <PageHeader title="Catégories" subtitle="Gestion des catégories et sous-catégories" />
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1">
-          <div className="bg-card border border-border rounded-xl p-4">
-            <h3 className="font-semibold mb-4">Ajouter une catégorie</h3>
-            <div className="space-y-3">
-              <div>
-                <Label className="text-xs">Nom</Label>
-                <Input value={categoryForm.name} onChange={(e) => setCategoryForm((p) => ({ ...p, name: e.target.value }))} 
-                       placeholder="Ex: Électronique" className="mt-1" />
-              </div>
-              <div>
-                <Label className="text-xs">Description (optionnel)</Label>
-                <Textarea value={categoryForm.description} onChange={(e) => setCategoryForm((p) => ({ ...p, description: e.target.value }))} 
-                         placeholder="Description..." rows={2} className="mt-1 text-xs" />
-              </div>
-              <Button className="w-full rounded-full" onClick={createCategory}><Plus className="w-4 h-4 mr-2" /> Créer</Button>
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-2">
-          <div className="space-y-4">
-            {categories.length === 0 ? (
-              <EmptyState title="Aucune catégorie" />
-            ) : (
-              categories.map((cat) => (
-                <div key={cat.id} className="bg-card border border-border rounded-xl p-4">
-                  {editingCat?.id === cat.id ? (
-                    <div className="space-y-3">
-                      <Input value={editingCat.name} onChange={(e) => setEditingCat((p) => ({ ...p, name: e.target.value }))} />
-                      <Textarea value={editingCat.description} onChange={(e) => setEditingCat((p) => ({ ...p, description: e.target.value }))} rows={2} />
-                      <div className="flex gap-2">
-                        <Button size="sm" className="rounded-full" onClick={() => updateCategory(cat.id)}>Enregistrer</Button>
-                        <Button size="sm" variant="outline" className="rounded-full" onClick={() => setEditingCat(null)}>Annuler</Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <h4 className="font-semibold">{cat.name}</h4>
-                        {cat.description && <p className="text-sm text-muted-foreground mt-1">{cat.description}</p>}
-                        <p className="text-xs text-muted-foreground mt-2">{cat.subcategories.length} sous-catégorie(s)</p>
-                      </div>
-                      <div className="flex gap-1">
-                        <Button size="sm" variant="outline" className="rounded-full h-8" onClick={() => setEditingCat(cat)}>Éditer</Button>
-                        <Button size="sm" variant="outline" className="rounded-full h-8 text-destructive" onClick={() => deleteCategory(cat.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
-                      </div>
-                    </div>
-                  )}
-
-                  {cat.subcategories && cat.subcategories.length > 0 && (
-                    <div className="mt-4 pt-4 border-t border-border">
-                      <p className="text-xs font-semibold text-muted-foreground mb-2">Sous-catégories</p>
-                      <div className="space-y-2">
-                        {cat.subcategories.map((sub) => (
-                          <div key={sub.id} className="flex items-center justify-between bg-accent/30 rounded-lg p-2 text-sm">
-                            {editingSub?.id === sub.id ? (
-                              <div className="flex-1 flex gap-1">
-                                <Input value={editingSub.name} onChange={(e) => setEditingSub((p) => ({ ...p, name: e.target.value }))} 
-                                       size="sm" className="h-7 text-xs" />
-                                <Button size="sm" className="h-7 rounded-full" onClick={() => updateSubcategory(sub.id)}>OK</Button>
-                                <Button size="sm" variant="outline" className="h-7 rounded-full" onClick={() => setEditingSub(null)}>✕</Button>
-                              </div>
-                            ) : (
-                              <>
-                                <span>{sub.name}</span>
-                                <div className="flex gap-1">
-                                  <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => setEditingSub(sub)}>Éditer</Button>
-                                  <Button size="sm" variant="ghost" className="h-6 px-2 text-destructive" onClick={() => deleteSubcategory(sub.id)}><Trash2 className="w-3 h-3" /></Button>
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-8 bg-card border border-border rounded-xl p-4">
-        <h3 className="font-semibold mb-4">Ajouter une sous-catégorie</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-          <Select value={subcategoryForm.category_id} onValueChange={(v) => setSubcategoryForm((p) => ({ ...p, category_id: v }))}>
-            <SelectTrigger className="rounded-full"><SelectValue placeholder="Sélectionnez une catégorie" /></SelectTrigger>
-            <SelectContent>
-              {categories.map((cat) => (
-                <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input value={subcategoryForm.name} onChange={(e) => setSubcategoryForm((p) => ({ ...p, name: e.target.value }))} 
-                 placeholder="Nom de la sous-catégorie" className="rounded-full" />
-          <Input value={subcategoryForm.description} onChange={(e) => setSubcategoryForm((p) => ({ ...p, description: e.target.value }))} 
-                 placeholder="Description (optionnel)" className="rounded-full" />
-          <Button className="rounded-full" onClick={createSubcategory}><Plus className="w-4 h-4 mr-2" /> Créer</Button>
-        </div>
-      </div>
     </div>
   );
 }

@@ -58,6 +58,9 @@ async def get_current_user(request: Request) -> dict:
         if payload.get("ver", 0) != user.get("token_version", 0):
             raise HTTPException(status_code=401, detail="Session expirée")
         user["id"] = str(user["_id"])
+        seen = user.get("last_seen")
+        if not seen or seen < (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat():
+            await db.users.update_one({"_id": user["_id"]}, {"$set": {"last_seen": datetime.now(timezone.utc).isoformat()}})
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Jeton expiré")

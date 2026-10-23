@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import api, { apiErr } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -46,17 +46,23 @@ function AuthShell({ children, title, sub }) {
   );
 }
 
-function redirectFor(user) {
+function redirectFor(user, from) {
   const staff = ["SUPER_ADMIN", "ADMIN", "SHOP_ADMIN", "PRODUCT_MANAGER", "ORDER_MANAGER", "MODERATOR", "ACCOUNTANT"];
   if (staff.includes(user.role)) return "/admin";
   if (user.role === "MERCHANT") return "/merchant";
-  return "/account";
+  if (user.role === "RELAY_MANAGER" || user.role === "CARRIER_AGENT") return "/partner";
+  const blocked = ["/login", "/register", "/forgot-password", "/reset-password"];
+  const ok = from && from.startsWith("/") && !from.startsWith("//") && !blocked.some((p) => from.startsWith(p))
+    && !from.startsWith("/admin") && !from.startsWith("/merchant");
+  return ok ? from : "/";
 }
 
 export function Login() {
   const { t } = useI18n();
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const from = location.state?.from;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -74,7 +80,7 @@ export function Login() {
         if (data.dev_code) toast.info(`Code de vérification (démo) : ${data.dev_code}`);
       } else {
         login(data.token, data.user);
-        navigate(redirectFor(data.user));
+        navigate(redirectFor(data.user, from), { replace: true });
       }
     } catch (err) {
       setError(apiErr(err));
@@ -89,7 +95,7 @@ export function Login() {
     try {
       const { data } = await api.post("/auth/2fa/verify", { challenge_id: challenge.challenge_id, code });
       login(data.token, data.user);
-      navigate(redirectFor(data.user));
+      navigate(redirectFor(data.user, from), { replace: true });
     } catch (err) {
       setError(apiErr(err));
     } finally {
@@ -144,7 +150,7 @@ export function Login() {
 }
 
 export function Register() {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { login } = useAuth();
   const navigate = useNavigate();
   const [sp] = useSearchParams();
@@ -156,6 +162,9 @@ export function Register() {
   const [countries, setCountries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [pendingMsg, setPendingMsg] = useState("");
+  const [partner, setPartner] = useState({ relay_point_id: "", carrier_id: "", name: "", city: "", address: "" });
+  const isPartner = form.role === "RELAY_MANAGER" || form.role === "CARRIER_AGENT";
 
   useEffect(() => {
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
@@ -172,10 +181,15 @@ export function Register() {
     try {
       const { data } = await api.post("/auth/register", {
         name: form.name, email: form.email, phone: form.phone, password: form.password,
-        role: form.role, country: form.country, invite_code: form.invite_code || null,
+        role: form.role, country: form.country, invite_code: form.invite_code || null, language: lang,
+        ...(form.role === "RELAY_MANAGER" ? (partner.relay_point_id ? { relay_point_id: partner.relay_point_id }
+          : { proposed_relay: { name: partner.name, city: partner.city, address: partner.address } }) : {}),
+        ...(form.role === "CARRIER_AGENT" ? { carrier_id: partner.carrier_id } : {}),
       });
+      if (data.pending) { setPendingMsg(data.message); return; }
       login(data.token, data.user);
       toast.success("Compte créé !");
+      if (data.restore_requested) toast.info(data.message, { duration: 10000 });
       navigate(form.role === "MERCHANT" ? "/merchant/onboarding" : "/account");
     } catch (err) {
       setError(apiErr(err));
@@ -184,12 +198,21 @@ export function Register() {
     }
   };
 
+  if (pendingMsg) {
+    return (
+      <AuthShell title="Inscription envoyée" sub="Compte partenaire logistique">
+        <div className="text-sm bg-green-50 border border-green-200 rounded-lg p-4" data-testid="reg-pending">{pendingMsg}</div>
+        <Link to="/login" className="block text-center text-primary text-sm mt-4">Retour à la connexion</Link>
+      </AuthShell>
+    );
+  }
+
   return (
     <AuthShell title={t("register")} sub="Rejoignez la plateforme en quelques secondes">
-      <div className="flex gap-2 mb-5 bg-muted p-1 rounded-full">
-        {[["CLIENT", "Client"], ["MERCHANT", "Commerçant"]].map(([v, l]) => (
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 mb-5 bg-muted p-1 rounded-2xl">
+        {[["CLIENT", "Client"], ["MERCHANT", "Commerçant"], ["RELAY_MANAGER", "Point relais"], ["CARRIER_AGENT", "Transporteur"]].map(([v, l]) => (
           <button key={v} type="button" onClick={() => upd("role", v)} data-testid={`role-${v}`}
-            className={`flex-1 py-2 rounded-full text-sm font-medium transition-colors ${form.role === v ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
+            className={`py-2 rounded-full text-sm font-medium transition-colors ${form.role === v ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
             {l}
           </button>
         ))}
@@ -221,6 +244,7 @@ export function Register() {
           </Select>
           {selectedCurrency && <div className="text-xs text-muted-foreground mt-1">Monnaie : {selectedCurrency}</div>}
         </div>
+        {isPartner && <PartnerFields role={form.role} country={form.country} partner={partner} setPartner={setPartner} />}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <Label>{t("password")}</Label>
@@ -231,10 +255,10 @@ export function Register() {
             <Input type="password" value={form.confirm} onChange={(e) => upd("confirm", e.target.value)} required data-testid="reg-confirm" className="mt-1" />
           </div>
         </div>
-        <div>
+        {!isPartner && <div>
           <Label>Code d'invitation (optionnel)</Label>
           <Input value={form.invite_code} onChange={(e) => upd("invite_code", e.target.value)} placeholder="INVITE-XXXXXX" data-testid="reg-invite" className="mt-1" />
-        </div>
+        </div>}
         {error && <div className="text-sm text-destructive" data-testid="reg-error">{error}</div>}
         <Button type="submit" className="w-full rounded-full h-11" disabled={loading} data-testid="reg-submit">
           {loading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}{t("register")}
@@ -244,6 +268,47 @@ export function Register() {
         </div>
       </form>
     </AuthShell>
+  );
+}
+
+function PartnerFields({ role, country, partner, setPartner }) {
+  const [points, setPoints] = useState([]);
+  const [carriers, setCarriers] = useState([]);
+  useEffect(() => {
+    if (role === "RELAY_MANAGER") api.get("/relay-points", { params: country ? { country } : {} }).then((r) => setPoints(r.data.relay_points)).catch(() => {});
+    else api.get("/logistics/carriers").then((r) => setCarriers(r.data.carriers)).catch(() => {});
+  }, [role, country]);
+  const set = (k, v) => setPartner((p) => ({ ...p, [k]: v }));
+  if (role === "CARRIER_AGENT") {
+    return (
+      <div data-testid="reg-carrier-fields">
+        <Label>Votre transporteur</Label>
+        <Select value={partner.carrier_id} onValueChange={(v) => set("carrier_id", v)}>
+          <SelectTrigger className="mt-1" data-testid="reg-carrier"><SelectValue placeholder="Choisir" /></SelectTrigger>
+          <SelectContent>{carriers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+        </Select>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 border border-border rounded-lg p-3" data-testid="reg-relay-fields">
+      <Label>Votre point relais</Label>
+      <Select value={partner.relay_point_id || "NEW"} onValueChange={(v) => set("relay_point_id", v === "NEW" ? "" : v)}>
+        <SelectTrigger data-testid="reg-relay-point"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="NEW">Nouveau point relais (à créer)</SelectItem>
+          {points.map((p) => <SelectItem key={p.id} value={p.id}>{p.name} — {p.city}</SelectItem>)}
+        </SelectContent>
+      </Select>
+      {!partner.relay_point_id && (
+        <div className="grid grid-cols-2 gap-2">
+          <Input placeholder="Nom du point relais" value={partner.name} onChange={(e) => set("name", e.target.value)} data-testid="reg-relay-name" />
+          <Input placeholder="Ville" value={partner.city} onChange={(e) => set("city", e.target.value)} data-testid="reg-relay-city" />
+          <Input className="col-span-2" placeholder="Adresse" value={partner.address} onChange={(e) => set("address", e.target.value)} data-testid="reg-relay-address" />
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">Votre compte sera actif après validation par l'administrateur.</p>
+    </div>
   );
 }
 
@@ -275,6 +340,39 @@ export function ForgotPassword() {
           </Button>
           <div className="text-sm text-center"><Link to="/login" className="text-primary">Retour à la connexion</Link></div>
         </form>
+      )}
+    </AuthShell>
+  );
+}
+
+export function ConfirmDeletion() {
+  const [sp] = useSearchParams();
+  const token = sp.get("token") || "";
+  const { logout } = useAuth();
+  const [done, setDone] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const confirm = async () => {
+    setLoading(true); setError("");
+    try { const { data } = await api.post("/account/deletion/confirm", { token }); logout(); setDone(data.message); }
+    catch (err) { setError(apiErr(err)); } finally { setLoading(false); }
+  };
+  return (
+    <AuthShell title="Suppression définitive du compte" sub="Cette action efface vos données personnelles">
+      {done ? (
+        <div className="space-y-4" data-testid="deletion-done">
+          <p className="text-sm">{done}</p>
+          <Link to="/" className="text-primary text-sm hover:underline">Retour à l'accueil</Link>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">Votre nom, e-mail et téléphone seront effacés. Vos commandes et factures sont conservées de façon anonyme pour la comptabilité, puis tout est effacé après 3 mois.</p>
+          {error && <div className="text-sm text-destructive" data-testid="deletion-confirm-error">{error}</div>}
+          <Button variant="destructive" className="w-full rounded-full h-11" disabled={loading || !token} onClick={confirm} data-testid="deletion-confirm-btn">
+            {loading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Confirmer la suppression définitive
+          </Button>
+          <Link to="/" className="block text-center text-sm text-muted-foreground hover:text-primary">Annuler</Link>
+        </div>
       )}
     </AuthShell>
   );

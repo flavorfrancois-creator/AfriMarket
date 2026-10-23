@@ -127,8 +127,15 @@ async def add_wallet_tx(user_id: str, wallet: str, amount: float, currency: str,
     return doc
 
 
-async def wallet_balances(user_id: str) -> dict:
-    """Compute virtual balances from the immutable ledger."""
+async def wallet_balances(user_id: str, target: str = None) -> dict:
+    """Compute virtual balances from the immutable ledger, converted to `target` currency when given."""
+    import fx
+    rates = None
+    if target:
+        try:
+            rates = (await fx.get_rates())["rates"]
+        except Exception:
+            rates = None
     balances = {w: {"pending": 0.0, "available": 0.0} for w in WALLET_TYPES}
     cursor = db.wallet_transactions.find({"user_id": user_id})
     async for tx in cursor:
@@ -136,6 +143,9 @@ async def wallet_balances(user_id: str) -> dict:
         if w not in balances:
             continue
         amt = float(tx.get("amount", 0))
+        cur = tx.get("currency")
+        if rates and cur and cur != target and cur in rates and target in rates:
+            amt = amt * rates[target] / rates[cur]
         st = tx.get("status")
         if st in ("PENDING", "AWAITING_VALIDATION"):
             balances[w]["pending"] += amt

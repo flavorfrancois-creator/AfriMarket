@@ -135,6 +135,13 @@ DEFAULT_SETTINGS = {
     "taxes_enabled": False,              # Module 7: global tax display toggle (no total impact)
     "legal_content": {},                 # Module 7: editable legal pages {kind: {title, body}}
     "csv_import_enabled": False,          # P1: allow merchants to bulk import products via CSV/XLSX
+    "customs_enabled": True,
+    "intl_shipping_currency": "USD",
+    "intl_shipping_base": 10.0,
+    "intl_shipping_per_kg": 4.0,
+    "intl_shipping_per_km": 0.002,
+    "intl_default_weight_kg": 1.0,
+    "reminder_not_collected_days": 3,
 }
 
 

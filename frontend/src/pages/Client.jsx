@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import JsBarcode from "jsbarcode";
 import api, { apiErr, downloadFile } from "@/lib/api";
+import { PayApiPicker } from "@/components/PayApiPicker";
 import { money } from "@/lib/currency";
 import { useI18n } from "@/lib/i18n";
 import { useAuth } from "@/context/AuthContext";
@@ -20,7 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  Home, ShoppingBag, Heart, Gift, Wallet, Users, Banknote, User, Copy, TrendingUp, UserPlus, FileText, Printer, Tag, ScanLine, Trash2, Truck,
+  Home, ShoppingBag, Heart, Gift, Wallet, Users, Banknote, User, Copy, TrendingUp, UserPlus, FileText, Printer, Tag, ScanLine, Trash2, Truck, XCircle, KeyRound,
 } from "lucide-react";
 
 export function ClientLayout() {
@@ -35,6 +36,7 @@ export function ClientLayout() {
     { to: "/account/withdrawals", label: t("my_withdrawals"), icon: Banknote, testid: "withdrawals" },
     { to: "/account/invitation", label: t("my_invitation"), icon: Users, testid: "invitation" },
     { to: "/account/profile", label: t("profile"), icon: User, testid: "profile" },
+    { to: "/account/security", label: "Mon compte & sécurité", icon: KeyRound, testid: "security" },
   ];
   return <DashboardShell nav={nav} title="Espace Client" subtitle="AfriMarket" />;
 }
@@ -68,7 +70,7 @@ export function ClientOverview() {
                 <TableRow key={o.id}>
                   <TableCell className="font-mono text-xs">{o.ref}</TableCell>
                   <TableCell>{o.shop_name}</TableCell>
-                  <TableCell className="font-mono text-right">{money(o.total, o.currency)}</TableCell>
+                  <TableCell className="font-mono text-right">{o.buyer_currency ? money(o.buyer_total, o.buyer_currency) : money(o.total, o.currency)}</TableCell>
                   <TableCell><StatusBadge status={o.status} /></TableCell>
                 </TableRow>
               ))}
@@ -79,6 +81,8 @@ export function ClientOverview() {
     </div>
   );
 }
+
+const CANCELLABLE = ["NOUVELLE", "EN_ATTENTE", "APPROUVEE", "EN_PREPARATION", "PRETE"];
 
 export function ClientOrders() {
   const { user } = useAuth();
@@ -91,6 +95,11 @@ export function ClientOrders() {
     const code = window.prompt(`Scannez / saisissez le numéro de suivi de la commande ${o.ref} :`, o.tracking_number);
     if (!code) return;
     try { await api.post(`/orders/${o.id}/confirm-receipt`, { code }); toast.success("Réception confirmée"); load(); }
+    catch (e) { toast.error(apiErr(e)); }
+  };
+  const cancelOrder = async (o) => {
+    if (!window.confirm(`Annuler la commande ${o.ref} ? Le montant payé sera remboursé sur votre solde.`)) return;
+    try { const { data } = await api.post(`/orders/${o.id}/cancel`); toast.success(data.message); load(); }
     catch (e) { toast.error(apiErr(e)); }
   };
   if (orders === null) return <Loading />;
@@ -113,7 +122,10 @@ export function ClientOrders() {
                   <TrackingButton order={o} />
                   <Button size="sm" variant="outline" className="rounded-full h-8" onClick={() => setInvoice(o)} data-testid={`invoice-${o.ref}`}><FileText className="w-3.5 h-3.5 mr-1" /> Facture</Button>
                   <Button size="sm" variant="outline" className="rounded-full h-8" onClick={() => setLabel(o)} data-testid={`label-${o.ref}`}><Tag className="w-3.5 h-3.5 mr-1" /> Étiquette</Button>
-                  {["EXPEDIEE", "LIVREE"].includes(o.status) && !o.delivered_confirmed && (
+                  {CANCELLABLE.includes(o.status) && !(o.route_events || []).length && (
+                    <Button size="sm" variant="outline" className="rounded-full h-8 text-destructive" onClick={() => cancelOrder(o)} data-testid={`cancel-${o.ref}`}><XCircle className="w-3.5 h-3.5 mr-1" /> Annuler</Button>
+                  )}
+                  {["EXPEDIEE", "LIVREE"].includes(o.status) && (!o.delivered_confirmed || (o.status === "EXPEDIEE" && o.last_mile)) && (
                     <Button size="sm" className="rounded-full h-8" onClick={() => confirmReceipt(o)} data-testid={`scan-${o.ref}`}><ScanLine className="w-3.5 h-3.5 mr-1" /> Scanner réception</Button>
                   )}
                 </div>
@@ -121,15 +133,26 @@ export function ClientOrders() {
               <div className="mt-3 flex flex-wrap gap-3">
                 {o.items.map((it, idx) => (
                   <div key={idx} className="flex items-center gap-2 text-sm">
-                    <img src={it.image} alt="" className="w-9 h-9 rounded object-cover" />
+                    {it.image ? <img src={it.image} alt="" className="w-9 h-9 rounded object-cover" /> : <div className="w-9 h-9 rounded bg-muted" />}
                     <span>{it.name} × {it.qty}</span>
                   </div>
                 ))}
               </div>
               <div className="mt-3 pt-3 border-t border-border flex justify-between text-sm">
-                <span className="text-muted-foreground">Total (dont livraison {money(o.shipping, o.currency)})</span>
-                <span className="font-mono font-semibold">{money(o.total, o.currency)}</span>
+                <span className="text-muted-foreground">Total (dont transport {o.buyer_currency ? money(o.buyer_shipping, o.buyer_currency) : money(o.shipping, o.currency)})</span>
+                <span className="font-mono font-semibold" data-testid={`order-total-${o.id}`}>{o.buyer_currency ? money(o.buyer_total, o.buyer_currency) : money(o.total, o.currency)}</span>
               </div>
+              {o.buyer_currency && o.buyer_currency !== o.currency && (
+                <div className="text-xs text-muted-foreground mt-1">Prix boutique : {money(o.total, o.currency)} — taux appliqué 1 {o.currency} = {Number(o.fx_rate).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {o.buyer_currency}</div>
+              )}
+              {o.customs_fee > 0 && (
+                <div className="text-xs mt-1 text-amber-700" data-testid={`order-customs-${o.id}`}>
+                  Douane ({o.customs_rate}%) : {money(o.customs_fee, o.buyer_currency)} — {o.customs_status === "DUE_ON_DELIVERY" ? "à payer à la livraison" : o.customs_status === "PAID_ON_DELIVERY" ? "payée à la livraison" : "payée"}
+                </div>
+              )}
+              {o.amount_due_on_delivery > 0 && (
+                <div className="text-xs mt-1" data-testid={`order-paid-now-${o.id}`}>Payé à la commande : <span className="font-mono">{money(o.amount_paid_now, o.buyer_currency)}</span></div>
+              )}
               {o.bonus_total > 0 && <div className="text-xs text-primary mt-1">Bonus généré : {money(o.bonus_total, o.currency)}</div>}
               {o.margin_total > 0 && <div className="text-xs text-green-600 mt-1">Marge revendeur : {money(o.margin_total, o.currency)}</div>}
             </div>
@@ -378,6 +401,7 @@ export function ClientWithdrawals() {
   const [dest, setDest] = useState("");
   const [bankName, setBankName] = useState("");
   const [accountName, setAccountName] = useState("");
+  const [payApiId, setPayApiId] = useState(null);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -390,7 +414,7 @@ export function ClientWithdrawals() {
   const submit = async () => {
     setLoading(true);
     try {
-      await api.post("/withdrawals", { amount: parseFloat(amount), method, destination: dest, bank_name: bankName, account_name: accountName });
+      await api.post("/withdrawals", { amount: parseFloat(amount), method, destination: dest, bank_name: bankName, account_name: accountName, payment_api_id: payApiId });
       toast.success("Demande de retrait enregistrée");
       setOpen(false); setAmount(""); setDest(""); setBankName(""); setAccountName("");
       load();
@@ -427,6 +451,7 @@ export function ClientWithdrawals() {
                 ) : (
                   <div><Label>N° Mobile Money</Label><Input value={dest} onChange={(e) => setDest(e.target.value)} className="mt-1" data-testid="withdrawal-dest" /></div>
                 )}
+                <PayApiPicker kind="WITHDRAWAL" value={payApiId} onChange={setPayApiId} />
                 <p className="text-xs text-muted-foreground">Le retrait vers un compte bancaire/mobile est soumis à l'approbation de l'administrateur, qui joindra un justificatif.</p>
               </div>
               <DialogFooter>

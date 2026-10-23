@@ -89,14 +89,18 @@ def _assert_safe_email(subject: str, html: str) -> None:
 
 async def send_email(*, to: str, subject: str, html: str) -> bool:
     """Send an email. Returns True on success; never raises to callers (best-effort)."""
-    base = os.environ.get("FRONTEND_URL", "").rstrip("/")
-    if not EMAIL_KEY or EMAIL_KEY.startswith("{") or not base.startswith("https://"):
-        logger.warning("Email not configured; would send to %s: %s", to, subject)
-        return False
     try:
         _assert_safe_email(subject, html)
     except ValueError as e:
         logger.error("Email blocked by guardrail: %s", e)
+        return False
+    from messaging import custom_send
+    custom = await custom_send(to, subject, html)
+    if custom is not None:
+        return custom
+    base = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    if not EMAIL_KEY or EMAIL_KEY.startswith("{") or not base.startswith("https://"):
+        logger.warning("Email not configured; would send to %s: %s", to, subject)
         return False
     payload = {"to": [to], "subject": subject, "html": html, "from_name": EMAIL_FROM_NAME}
     try:
@@ -123,38 +127,21 @@ def _wrap(inner: str) -> str:
     )
 
 
-async def send_verification_email(to_email: str, code: str) -> bool:
-    html = _wrap(
-        f'<h2 style="font-family:Arial,sans-serif">Vérifiez votre adresse e-mail</h2>'
-        f'<p>Votre code de vérification {escape(EMAIL_FROM_NAME)} est :</p>'
-        f'<p style="font-size:28px;font-weight:bold;letter-spacing:4px">{escape(code)}</p>'
-        f'<p>Ce code expire dans 30 minutes.</p>'
-    )
-    return await send_email(to=to_email, subject=f"Votre code de vérification {EMAIL_FROM_NAME}", html=html)
+async def send_verification_email(to_email: str, code: str, lang: str = "fr", name: str = "") -> bool:
+    from messaging import auth_email
+    return await auth_email(to_email, "auth_verify_email", {"code": code, "name": name}, lang)
 
 
-async def send_2fa_code(to_email: str, code: str) -> bool:
-    html = _wrap(
-        f'<h2 style="font-family:Arial,sans-serif">Code de connexion sécurisée</h2>'
-        f'<p>Votre code de vérification en deux étapes {escape(EMAIL_FROM_NAME)} est :</p>'
-        f'<p style="font-size:28px;font-weight:bold;letter-spacing:4px">{escape(code)}</p>'
-        f'<p>Ce code expire dans 10 minutes. Ne le partagez avec personne.</p>'
-    )
-    return await send_email(to=to_email, subject=f"Code de connexion {EMAIL_FROM_NAME}", html=html)
+async def send_2fa_code(to_email: str, code: str, lang: str = "fr", name: str = "") -> bool:
+    from messaging import auth_email
+    return await auth_email(to_email, "auth_otp", {"code": code, "name": name}, lang)
 
 
-async def send_password_reset_email(to_email: str, token: str) -> bool:
+async def send_password_reset_email(to_email: str, token: str, lang: str = "fr", name: str = "") -> bool:
+    from messaging import auth_email
     base = os.environ.get("FRONTEND_URL", "").rstrip("/")
     link = f"{base}/reset-password?token={token}"
-    if not EMAIL_KEY or EMAIL_KEY.startswith("{") or not base.startswith("https://"):
-        if urlparse(base).hostname in ("localhost", "127.0.0.1", "::1"):
-            logger.warning("Email not configured; password reset link: %s", link)
-        else:
-            logger.error("Password reset email not configured")
+    if not base.startswith("https://"):
+        logger.error("Password reset email not configured")
         return False
-    html = _wrap(
-        f'<p>Nous avons reçu une demande de réinitialisation de votre mot de passe {escape(EMAIL_FROM_NAME)}.</p>'
-        f'<p><a href="{escape(link)}">Réinitialiser mon mot de passe</a></p>'
-        f'<p>Ce lien expire dans 1 heure et ne peut être utilisé qu\'une seule fois.</p>'
-    )
-    return await send_email(to=to_email, subject=f"Réinitialisez votre mot de passe {EMAIL_FROM_NAME}", html=html)
+    return await auth_email(to_email, "auth_password_reset", {"link": link, "name": name}, lang)
