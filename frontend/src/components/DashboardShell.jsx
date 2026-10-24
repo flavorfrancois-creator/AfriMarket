@@ -2,7 +2,8 @@ import React, { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate, Outlet } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useI18n } from "@/lib/i18n";
-import api from "@/lib/api";
+import api, { apiErr } from "@/lib/api";
+import { toast } from "sonner";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
@@ -58,6 +59,33 @@ export function DashboardShell({ nav, title, subtitle }) {
   const partner = isPartnerRole(user?.role);
   const [notifs, setNotifs] = useState([]);
   const [unread, setUnread] = useState(0);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const notificationDestinations = {
+    ACCOUNT: partner ? "/partner/account" : "/account/security",
+    ACCOUNT_DELETION: "/admin/account-deletions",
+    ADMIN_MESSAGE: "/partner/messages",
+    APPROVAL: "/admin/approvals",
+    CATEGORY: "/merchant/products",
+    CUSTOMER_TYPE: "/account/profile",
+    EARNING_REJECTED: "/account/wallet",
+    EARNING_VALIDATED: "/account/wallet",
+    KYC: "/account/profile",
+    NEW_ORDER: "/merchant/orders",
+    ORDER_UPDATE: partner ? "/partner/parcels" : user?.role === "MERCHANT" ? "/merchant/orders" : "/account/orders",
+    PARCEL: "/partner/parcels",
+    PARTNER_SIGNUP: "/admin/logistics",
+    PAYMENT: "/merchant/orders",
+    PAYOUT: "/merchant",
+    PRODUCT_MODERATION: "/merchant/products",
+    PRODUCT_REPORT: "/admin/reports",
+    REFERRAL: "/account/invitation",
+    SECURITY: partner ? "/partner/account" : "/account/security",
+    SHOP_APPROVED: "/merchant",
+    SHOP_REJECTED: "/merchant",
+    SHOP_SUBMITTED: "/admin/shops",
+    STOCK: "/merchant/products",
+    WITHDRAWAL: ["ADMIN", "SUPER_ADMIN"].includes(user?.role) ? "/admin/withdrawals" : "/account/withdrawals",
+  };
 
   const loadNotifs = async () => {
     try {
@@ -71,6 +99,26 @@ export function DashboardShell({ nav, title, subtitle }) {
   const markAll = async () => {
     await api.put("/notifications/read-all");
     loadNotifs();
+  };
+
+  const openNotification = async (notification) => {
+    if (!notification.read) {
+      setNotifs((items) => items.map((item) => item.id === notification.id ? { ...item, read: true } : item));
+      setUnread((count) => Math.max(0, count - 1));
+      try {
+        await api.put(`/notifications/${notification.id}/read`);
+      } catch (e) {
+        toast.error(apiErr(e));
+      }
+    }
+    setNotificationsOpen(false);
+    const target = notification.link || notificationDestinations[notification.type] || (
+      partner ? "/partner" : ["ADMIN", "SUPER_ADMIN", "SHOP_ADMIN", "PRODUCT_MANAGER", "ORDER_MANAGER", "MODERATOR", "ACCOUNTANT"].includes(user?.role)
+        ? "/admin" : user?.role === "MERCHANT" ? "/merchant" : "/account"
+    );
+    if (typeof target === "string" && target.startsWith("/") && !target.startsWith("//")) {
+      navigate(target);
+    }
   };
 
   return (
@@ -102,7 +150,7 @@ export function DashboardShell({ nav, title, subtitle }) {
                 <Home className="w-5 h-5" />
               </Button>
             )}
-            <DropdownMenu onOpenChange={(o) => o && loadNotifs()}>
+            <DropdownMenu open={notificationsOpen} onOpenChange={(open) => { setNotificationsOpen(open); if (open) loadNotifs(); }}>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="relative" data-testid="notif-btn">
                   <Bell className="w-5 h-5" />
@@ -122,10 +170,17 @@ export function DashboardShell({ nav, title, subtitle }) {
                 <ScrollArea className="max-h-80">
                   {notifs.length === 0 && <div className="px-3 py-6 text-center text-sm text-muted-foreground">{t("no_data")}</div>}
                   {notifs.map((n) => (
-                    <div key={n.id} className={`px-3 py-2 text-sm border-b border-border/50 ${!n.read ? "bg-accent/40" : ""}`}>
-                      <div className="font-medium">{n.title}</div>
-                      <div className="text-xs text-muted-foreground">{n.message}</div>
-                    </div>
+                    <DropdownMenuItem
+                      key={n.id}
+                      onSelect={() => openNotification(n)}
+                      className={`h-auto items-start whitespace-normal px-3 py-2 border-b border-border/50 ${!n.read ? "bg-accent/40" : ""}`}
+                      data-testid={`notification-${n.id}`}
+                    >
+                      <div className="min-w-0">
+                        <div className="font-medium">{n.title}</div>
+                        <div className="text-xs text-muted-foreground">{n.message}</div>
+                      </div>
+                    </DropdownMenuItem>
                   ))}
                 </ScrollArea>
               </DropdownMenuContent>

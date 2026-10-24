@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CrossBorderSettings } from "@/components/CrossBorderSettings";
 import { AdminCountryApis } from "@/components/AdminCountryApis";
@@ -634,9 +635,15 @@ export function AdminOrders() {
 }
 
 export function AdminWithdrawals() {
+  const [searchParams] = useSearchParams();
   const [list, setList] = useState(null);
+  const selectedWithdrawalId = searchParams.get("withdrawal_id");
   const load = () => api.get("/admin/withdrawals").then((r) => setList(r.data.withdrawals)).catch(() => setList([]));
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!list || !selectedWithdrawalId || !list.some((withdrawal) => withdrawal.id === selectedWithdrawalId)) return;
+    document.getElementById(`withdrawal-${selectedWithdrawalId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [list, selectedWithdrawalId]);
   const decide = async (id, status) => {
     let reference = "";
     if (status === "TRAITE") {
@@ -656,7 +663,7 @@ export function AdminWithdrawals() {
             <TableHeader><TableRow><TableHead>Utilisateur</TableHead><TableHead className="text-right">Montant</TableHead><TableHead>Destination</TableHead><TableHead>Statut</TableHead><TableHead>Actions</TableHead></TableRow></TableHeader>
             <TableBody>
               {list.map((w) => (
-                <TableRow key={w.id}>
+                <TableRow id={`withdrawal-${w.id}`} key={w.id} className={w.id === selectedWithdrawalId ? "bg-primary/10" : ""}>
                   <TableCell className="text-sm">{w.user_name}</TableCell>
                   <TableCell className="text-right font-mono">{money(w.amount, w.currency)}</TableCell>
                   <TableCell className="text-xs">

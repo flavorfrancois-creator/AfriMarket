@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import JsBarcode from "jsbarcode";
 import api, { apiErr, downloadFile } from "@/lib/api";
@@ -86,11 +86,17 @@ const CANCELLABLE = ["NOUVELLE", "EN_ATTENTE", "APPROUVEE", "EN_PREPARATION", "P
 
 export function ClientOrders() {
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
   const [orders, setOrders] = useState(null);
   const [invoice, setInvoice] = useState(null);
   const [label, setLabel] = useState(null);
+  const selectedOrderId = searchParams.get("order_id");
   const load = () => api.get("/orders/mine").then((r) => setOrders(r.data.orders)).catch(() => setOrders([]));
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!orders || !selectedOrderId || !orders.some((order) => order.id === selectedOrderId)) return;
+    document.getElementById(`order-${selectedOrderId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [orders, selectedOrderId]);
   const confirmReceipt = async (o) => {
     const code = window.prompt(`Scannez / saisissez le numéro de suivi de la commande ${o.ref} :`, o.tracking_number);
     if (!code) return;
@@ -109,7 +115,7 @@ export function ClientOrders() {
       {orders.length === 0 ? <EmptyState title="Aucune commande" /> : (
         <div className="space-y-3">
           {orders.map((o) => (
-            <div key={o.id} className="bg-card border border-border rounded-xl p-4" data-testid={`order-${o.ref}`}>
+            <div id={`order-${o.id}`} key={o.id} className={`bg-card border border-border rounded-xl p-4 ${o.id === selectedOrderId ? "ring-2 ring-primary" : ""}`} data-testid={`order-${o.ref}`}>
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
                   <span className="font-mono text-sm font-semibold">{o.ref}</span>

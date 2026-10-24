@@ -1,5 +1,5 @@
 import React, { useEffect, useState, createContext, useContext, useCallback } from "react";
-import { Navigate, useNavigate, Link } from "react-router-dom";
+import { Navigate, useNavigate, Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, CartesianGrid,
@@ -557,11 +557,17 @@ const NEXT_ACTIONS = {
 
 export function MerchantOrders() {
   const { shop } = useMerchant();
+  const [searchParams] = useSearchParams();
   const [orders, setOrders] = useState(null);
   const [filter, setFilter] = useState("");
   const [carriers, setCarriers] = useState([]);
+  const selectedOrderId = searchParams.get("order_id");
   const load = () => api.get(`/shops/${shop.id}/orders`).then((r) => setOrders(r.data.orders)).catch(() => setOrders([]));
   useEffect(() => { load(); api.get("/carriers").then((r) => setCarriers(r.data.carriers)).catch(() => {}); }, []);
+  useEffect(() => {
+    if (!orders || !selectedOrderId || !orders.some((order) => order.id === selectedOrderId)) return;
+    document.getElementById(`merchant-order-${selectedOrderId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [orders, selectedOrderId]);
   const changeStatus = async (o, status) => { try { await api.put(`/orders/${o.id}/status`, { status }); toast.success("Statut mis à jour"); load(); } catch (e) { toast.error(apiErr(e)); } };
   const assignCarrier = async (o, carrier_id) => { try { await api.put(`/orders/${o.id}/shipping`, { carrier_id }); toast.success("Transporteur assigné"); load(); } catch (e) { toast.error(apiErr(e)); } };
   if (orders === null) return <Loading />;
@@ -581,7 +587,7 @@ export function MerchantOrders() {
       {filtered.length === 0 ? <EmptyState title="Aucune commande" /> : (
         <div className="space-y-3">
           {filtered.map((o) => (
-            <div key={o.id} className="bg-card border border-border rounded-xl p-4" data-testid={`morder-${o.ref}`}>
+            <div id={`merchant-order-${o.id}`} key={o.id} className={`bg-card border border-border rounded-xl p-4 ${o.id === selectedOrderId ? "ring-2 ring-primary" : ""}`} data-testid={`morder-${o.ref}`}>
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
                   <span className="font-mono text-sm font-semibold">{o.ref}</span>

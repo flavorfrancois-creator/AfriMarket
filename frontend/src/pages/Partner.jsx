@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import api, { apiErr } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -235,8 +236,14 @@ export function PartnerScan() {
 }
 
 export function PartnerParcels() {
+  const [searchParams] = useSearchParams();
   const [rows, setRows] = useState(null);
+  const selectedOrderId = searchParams.get("order_id");
   useEffect(() => { api.get("/partner/parcels").then((r) => setRows(r.data.parcels)).catch(() => setRows([])); }, []);
+  useEffect(() => {
+    if (!rows || !selectedOrderId || !rows.some((parcel) => parcel.id === selectedOrderId)) return;
+    document.getElementById(`partner-parcel-${selectedOrderId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [rows, selectedOrderId]);
   return (
     <div>
       <PageHeader title="Mes colis" subtitle="Colis passés par votre point relais ou confiés à votre transporteur" />
@@ -244,7 +251,7 @@ export function PartnerParcels() {
       {rows && rows.length === 0 && <EmptyState title="Aucun colis" description="Les colis scannés apparaîtront ici." />}
       <div className="space-y-3">
         {(rows || []).map((p) => (
-          <div key={p.id} className="bg-card border border-border rounded-xl p-4" data-testid={`parcel-row-${p.ref}`}>
+          <div id={`partner-parcel-${p.id}`} key={p.id} className={`bg-card border border-border rounded-xl p-4 ${p.id === selectedOrderId ? "ring-2 ring-primary" : ""}`} data-testid={`parcel-row-${p.ref}`}>
             <div className="flex items-center justify-between gap-2">
               <div className="font-mono text-sm font-semibold">{p.ref} <span className="text-xs text-muted-foreground font-sans">{p.tracking_number}</span></div>
               <StatusBadge status={p.status} />

@@ -234,7 +234,7 @@ async def admin_update_partner(uid: str, req: PartnerAccountReq, user: dict = De
         key = {"ACTIVE": "auth_account_approved" if old_status == "PENDING" else "auth_account_reactivated",
                "REJECTED": "auth_account_rejected", "SUSPENDED": "auth_account_suspended"}.get(new_status)
         if key:
-            await send_message(uid, key, {}, "/partner", "ACCOUNT")
+            await send_message(uid, key, {}, "/partner/account", "ACCOUNT")
     await audit_log(user, "UPDATE_PARTNER", "user", uid, target.get("status"),
                     {k: v for k, v in upd.items() if k != "token_version"})
     return {"account": _partner_public(await db.users.find_one({"_id": target["_id"]}))}
@@ -262,7 +262,7 @@ async def admin_decide_change(rid: str, req: ChangeDecisionReq, user: dict = Dep
         await db.relay_points.update_one({"id": cr["relay_point_id"]}, {"$set": {**cr["changes"], "updated_at": now_iso()}})
     await send_message(cr["requested_by"], "relay_change_decision",
                        {"point": cr.get("relay_name", ""), "decision": "acceptée" if req.decision == "APPROVE" else "refusée"},
-                       "/partner", "RELAY_CHANGE")
+                       "/partner/relay-points", "RELAY_CHANGE")
     await audit_log(user, "DECIDE_RELAY_CHANGE", "relay_point", cr["relay_point_id"], None, req.decision)
     return {"message": "Demande traitée"}
 
@@ -445,26 +445,30 @@ async def partner_parcel_event(code: str, req: ParcelEventReq, user: dict = Depe
     owner = shop["owner_id"] if shop else None
     if req.type == "AVAILABLE_PICKUP":
         await send_message(order["customer_id"], "client_parcel_available", {"ref": ref, "location": location, "code": code_hint},
-                           "/account/orders", "ORDER_UPDATE")
+                           f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
         if owner:
-            await send_message(owner, "merchant_parcel_available", {"ref": ref, "location": location}, "/merchant/orders", "ORDER_UPDATE")
+            await send_message(owner, "merchant_parcel_available", {"ref": ref, "location": location},
+                               f"/merchant/orders?order_id={order['id']}", "ORDER_UPDATE")
         await send_to_users({"role": "RELAY_MANAGER", "relay_point_id": point_id, "status": "ACTIVE"}, "relay_parcel_to_handover",
-                            {"ref": ref, "customer": order.get("customer_name", "")}, "/partner", "PARCEL")
+                            {"ref": ref, "customer": order.get("customer_name", "")},
+                            f"/partner/parcels?order_id={order['id']}", "PARCEL")
     elif req.type == "HANDED_LOCAL_COURIER":
         await send_message(order["customer_id"], "client_parcel_local_courier",
                            {"ref": ref, "courier": courier["name"], "phone": courier["phone"], "code": code_hint},
-                           "/account/orders", "ORDER_UPDATE")
+                           f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
         if owner:
             await send_message(owner, "merchant_parcel_picked", {"ref": ref, "location": f"livreur local {courier['name']}"},
-                               "/merchant/orders", "ORDER_UPDATE")
+                               f"/merchant/orders?order_id={order['id']}", "ORDER_UPDATE")
     else:
         await send_message(order["customer_id"], "client_parcel_at_relay", {"ref": ref, "location": f"{EVENT_LABELS[req.type].lower()} — {location}"},
-                           "/account/orders", "ORDER_UPDATE")
+                           f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
         if owner and not order.get("route_events"):
-            await send_message(owner, "merchant_parcel_picked", {"ref": ref, "location": location}, "/merchant/orders", "ORDER_UPDATE")
+            await send_message(owner, "merchant_parcel_picked", {"ref": ref, "location": location},
+                               f"/merchant/orders?order_id={order['id']}", "ORDER_UPDATE")
         if user["role"] == "CARRIER_AGENT" and point_id and req.type in ("POSITION", "DEPARTED"):
             await send_to_users({"role": "RELAY_MANAGER", "relay_point_id": point_id, "status": "ACTIVE"}, "relay_parcel_incoming",
-                                {"ref": ref, "carrier": order.get("carrier_name") or user.get("name", "")}, "/partner", "PARCEL")
+                                {"ref": ref, "carrier": order.get("carrier_name") or user.get("name", "")},
+                                f"/partner/parcels?order_id={order['id']}", "PARCEL")
     return {"message": "Progression du colis mise à jour", "event": ev,
             "parcel": _parcel_view(await db.orders.find_one({"id": order["id"]}))}
 
@@ -490,7 +494,8 @@ async def run_daily_reminders() -> dict:
             continue
         q = {"role": "RELAY_MANAGER", "relay_point_id": ev.get("relay_point_id"), "status": "ACTIVE"}
         stats["relay_messages"] += await db.users.count_documents(q)
-        await send_to_users(q, "relay_parcel_not_collected", {"ref": o["ref"], "days": waited}, "/partner", "PARCEL")
+        await send_to_users(q, "relay_parcel_not_collected", {"ref": o["ref"], "days": waited},
+                            f"/partner/parcels?order_id={o['id']}", "PARCEL")
         await db.orders.update_one({"id": o["id"]}, {"$set": {"reminder_not_collected_on": today}})
         stats["not_collected"] += 1
     async for o in db.orders.find({"status": "EXPEDIEE", "carrier_id": {"$nin": [None, ""]},
@@ -499,7 +504,8 @@ async def run_daily_reminders() -> dict:
             continue
         q = {"role": "CARRIER_AGENT", "carrier_id": o["carrier_id"], "status": "ACTIVE"}
         stats["carrier_messages"] += await db.users.count_documents(q)
-        await send_to_users(q, "carrier_delivery_late", {"ref": o["ref"]}, "/partner", "PARCEL")
+        await send_to_users(q, "carrier_delivery_late", {"ref": o["ref"]},
+                            f"/partner/parcels?order_id={o['id']}", "PARCEL")
         await db.orders.update_one({"id": o["id"]}, {"$set": {"reminder_late_on": today}})
         stats["late"] += 1
     await db.cron_runs.update_one({"_id": "last_daily_reminders"}, {"$set": {"at": now_iso(), "stats": stats}}, upsert=True)

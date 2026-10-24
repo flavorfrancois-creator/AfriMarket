@@ -508,7 +508,7 @@ async def register(req: RegisterReq, background_tasks: BackgroundTasks):
         })
         await db.users.update_one({"_id": ObjectId(referred_by)}, {"$set": {"is_partner": True}})
         await notify(referred_by, "REFERRAL", "Nouveau filleul",
-                     f"{req.name} s'est inscrit avec votre code INVITE.")
+                     f"{req.name} s'est inscrit avec votre code INVITE.", "/account/invitation")
 
     background_tasks.add_task(send_verification_email, email, code, doc["language"], doc["name"])
     restore = await accounts.check_restore(doc)
@@ -1000,7 +1000,7 @@ async def submit_shop(shop_id: str, user: dict = Depends(require_roles("MERCHANT
     await audit_log(user, "SUBMIT_SHOP", "shop", shop_id, shop["status"], "SUBMITTED")
     async for a in db.users.find({"role": {"$in": ["SUPER_ADMIN", "ADMIN"]}}):
         await notify(str(a["_id"]), "SHOP_SUBMITTED", "Nouvelle demande de boutique",
-                     f"{shop['name']} attend validation.")
+                     f"{shop['name']} attend validation.", "/admin/shops")
     return {"message": "Boutique soumise pour validation"}
 
 
@@ -1767,15 +1767,16 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
                                     f"Recette commande {order['ref']}", shop_id, order["id"])
 
         await send_message(shop["owner_id"], "merchant_new_order", {"ref": order["ref"], "total": _m(grand_total, shop["currency"]),
-                           "customer": order.get("customer_name", "")}, "/merchant/orders", "NEW_ORDER")
+                           "customer": order.get("customer_name", "")},
+                           f"/merchant/orders?order_id={order['id']}", "NEW_ORDER")
         if str(payment.get("status", "")).startswith("PAID"):
             await send_message(shop["owner_id"], "merchant_payment_received", {"ref": order["ref"], "amount": _m(grand_total, shop["currency"])},
-                               "/merchant/orders", "PAYMENT")
+                               f"/merchant/orders?order_id={order['id']}", "PAYMENT")
         await send_message(user["id"], "client_order_confirmed", {"ref": order["ref"], "total": _m(payable, bcur)},
-                           "/account/orders", "ORDER_UPDATE")
+                           f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
         if customs > 0 and customs_mode == "ON_DELIVERY":
             await send_message(user["id"], "client_customs_due", {"ref": order["ref"], "amount": _m(customs, bcur)},
-                               "/account/orders", "ORDER_UPDATE")
+                               f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
         for p, _q, _v in entries:
             fresh = await db.products.find_one({"id": p["id"]}, {"stock": 1, "name": 1})
             if fresh and int(fresh.get("stock", 0)) <= LOW_STOCK:
@@ -1867,15 +1868,17 @@ async def update_order_status(order_id: str, req: OrderStatusReq, user: dict = D
     key = STATUS_TEMPLATES.get(new_status)
     if key:
         await send_message(order["customer_id"], key, {"ref": order["ref"], "carrier": order.get("carrier_name") or "—",
-                           "tracking": order.get("tracking_number") or order["ref"]}, "/account/orders", "ORDER_UPDATE")
+                           "tracking": order.get("tracking_number") or order["ref"]},
+                           f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
     else:
         await notify(order["customer_id"], "ORDER_UPDATE", "Mise à jour commande",
-                     f"Commande {order['ref']} : {new_status}.")
+                     f"Commande {order['ref']} : {new_status}.",
+                     f"/account/orders?order_id={order['id']}")
     if order.get("carrier_id") and new_status in ("PRETE", "LIVREE"):
         await send_to_users({"role": "CARRIER_AGENT", "carrier_id": order["carrier_id"], "status": "ACTIVE"},
                             "carrier_parcel_ready" if new_status == "PRETE" else "carrier_parcel_delivered",
                             {"ref": order["ref"], "shop": order.get("shop_name", ""), "address": (shop or {}).get("address", "")},
-                            "/partner", "PARCEL")
+                            f"/partner/parcels?order_id={order['id']}", "PARCEL")
     return {"message": "Statut mis à jour", "status": new_status}
 
 
@@ -1934,10 +1937,11 @@ async def _cancel_order(order: dict, actor: dict, new_status: str = "ANNULEE") -
     label = "annulée" if new_status == "ANNULEE" else "rejetée"
     amount_txt = _m(refund, cur)
     await send_message(claimed["customer_id"], "client_order_cancelled", {"ref": claimed["ref"], "refund": amount_txt},
-                       "/account/wallet", "ORDER_UPDATE")
+                       f"/account/orders?order_id={claimed['id']}", "ORDER_UPDATE")
     shop = await db.shops.find_one({"id": claimed["shop_id"]})
     if shop and shop.get("owner_id") != actor["id"]:
-        await send_message(shop["owner_id"], "merchant_order_cancelled", {"ref": claimed["ref"]}, "/merchant/orders", "ORDER_UPDATE")
+        await send_message(shop["owner_id"], "merchant_order_cancelled", {"ref": claimed["ref"]},
+                           f"/merchant/orders?order_id={claimed['id']}", "ORDER_UPDATE")
     who = "votre solde" if actor["id"] == claimed["customer_id"] else "le solde du client"
     return {"message": f"Commande {label}" + (f", {amount_txt} remboursés sur {who}" if refund > 0 else ""),
             "refund": refund, "currency": cur}
@@ -1976,7 +1980,7 @@ async def _credit_seller_payout(order: dict, shop: dict):
         "status": "AVAILABLE", "created_at": now_iso(),
     })
     await send_message(owner, "merchant_payout_credited", {"ref": order["ref"], "amount": _m(net, order["currency"])},
-                       "/merchant/finance", "PAYOUT")
+                       "/merchant", "PAYOUT")
 
 
 async def _order_or_404(order_id: str) -> dict:
@@ -2312,7 +2316,7 @@ async def set_customer_type(shop_id: str, user_id: str, req: CustomerTypeReq, us
                                        {"$set": {"type": req.type}}, upsert=True)
     await audit_log(user, "CUSTOMER_TYPE", "customer", user_id, rec.get("type") if rec else None, req.type)
     await notify(user_id, "CUSTOMER_TYPE", "Statut client mis à jour",
-                 f"Votre statut chez {shop['name']} est désormais {req.type}.")
+                 f"Votre statut chez {shop['name']} est désormais {req.type}.", "/account/profile")
     return {"message": "Type client mis à jour"}
 
 
@@ -2351,7 +2355,8 @@ async def request_withdrawal(req: WithdrawReq, user: dict = Depends(get_current_
     await audit_log(user, "WITHDRAW_REQUEST", "withdrawal", doc["id"], None, doc["amount"])
     async for a in db.users.find({"role": {"$in": ["SUPER_ADMIN", "ADMIN"]}}):
         await notify(str(a["_id"]), "WITHDRAWAL", "Demande de retrait",
-                     f"{user['name']} demande un retrait de {doc['amount']} {doc['currency']}.")
+                     f"{user['name']} demande un retrait de {doc['amount']} {doc['currency']}.",
+                     f"/admin/withdrawals?withdrawal_id={doc['id']}")
     return {"message": "Demande de retrait enregistrée", "withdrawal": serialize(doc)}
 
 
@@ -2542,7 +2547,7 @@ async def approve_shop(shop_id: str, request: Request, user: dict = Depends(requ
     await db.shops.update_one({"id": shop_id}, {"$set": {"status": "APPROVED", "rejection_reason": ""}})
     await audit_log(user, "APPROVE_SHOP", "shop", shop_id, shop["status"], "APPROVED", _client_ip(request))
     await notify(shop["owner_id"], "SHOP_APPROVED", "Boutique approuvée",
-                 f"Félicitations ! Votre boutique {shop['name']} est approuvée.")
+                 f"Félicitations ! Votre boutique {shop['name']} est approuvée.", "/merchant")
     return {"message": "Boutique approuvée"}
 
 
@@ -2555,7 +2560,7 @@ async def reject_shop(shop_id: str, payload: dict, request: Request, user: dict 
     await db.shops.update_one({"id": shop_id}, {"$set": {"status": "REJECTED", "rejection_reason": reason}})
     await audit_log(user, "REJECT_SHOP", "shop", shop_id, shop["status"], "REJECTED", _client_ip(request))
     await notify(shop["owner_id"], "SHOP_REJECTED", "Boutique rejetée",
-                 f"Votre boutique {shop['name']} a été rejetée : {reason}")
+                 f"Votre boutique {shop['name']} a été rejetée : {reason}", "/merchant")
     return {"message": "Boutique rejetée"}
 
 
@@ -2567,7 +2572,7 @@ async def admin_verify_kyc(user_id: str, payload: dict, user: dict = Depends(req
     await db.merchant_verifications.update_one({"user_id": user_id}, {"$set": {"status": status}})
     await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"kyc_status": status}})
     await audit_log(user, "VERIFY_KYC", "kyc", user_id, None, status)
-    await notify(user_id, "KYC", "Vérification d'identité", f"Statut KYC : {status}")
+    await notify(user_id, "KYC", "Vérification d'identité", f"Statut KYC : {status}", "/account/profile")
     return {"message": "KYC mis à jour"}
 
 
@@ -2635,7 +2640,7 @@ async def admin_decide_withdrawal(wid: str, req: WithdrawDecisionReq, request: R
         await db.withdrawal_requests.update_one({"id": wid}, {"$set": {"debited": True}})
     await audit_log(user, "WITHDRAWAL_DECISION", "withdrawal", wid, w["status"], status, _client_ip(request))
     await send_message(w["user_id"], "client_withdrawal_processed", {"amount": _m(w.get("amount"), w.get("currency")), "status": status},
-                       "/account/wallet", "WITHDRAWAL")
+                       "/account/withdrawals", "WITHDRAWAL")
     return {"message": "Décision enregistrée"}
 
 
@@ -2744,10 +2749,12 @@ async def assign_shipping(order_id: str, req: ShippingReq, user: dict = Depends(
     await db.orders.update_one({"id": order_id}, {"$set": upd})
     await audit_log(user, "ASSIGN_CARRIER", "order", order_id, order.get("carrier_name"), carrier["name"])
     await notify(order["customer_id"], "ORDER_UPDATE", "Transporteur assigné",
-                 f"Commande {order['ref']} confiée à {carrier['name']}. Suivi : {upd.get('tracking_number', order.get('tracking_number'))}")
+                 f"Commande {order['ref']} confiée à {carrier['name']}. Suivi : {upd.get('tracking_number', order.get('tracking_number'))}",
+                 f"/account/orders?order_id={order['id']}")
     await send_to_users({"role": "CARRIER_AGENT", "carrier_id": carrier["id"], "status": "ACTIVE"}, "carrier_new_parcel",
                         {"ref": order["ref"], "shop": order.get("shop_name", ""),
-                         "destination": order.get("destination_country") or order.get("address", "")}, "/partner", "PARCEL")
+                         "destination": order.get("destination_country") or order.get("address", "")},
+                        f"/partner/parcels?order_id={order['id']}", "PARCEL")
     return {"message": "Transporteur assigné", **upd}
 
 
@@ -2798,7 +2805,8 @@ async def confirm_receipt(order_id: str, req: ConfirmReceiptReq, user: dict = De
     await _deliver_last_mile(order, user)
     await audit_log(user, "CONFIRM_RECEIPT", "order", order_id, None, code)
     await notify(order["customer_id"], "ORDER_UPDATE", "Réception confirmée",
-                 f"Réception de la commande {order['ref']} confirmée par scan.")
+                 f"Réception de la commande {order['ref']} confirmée par scan.",
+                 f"/account/orders?order_id={order['id']}")
     return {"message": "Réception confirmée"}
 
 
@@ -2843,11 +2851,14 @@ async def _deliver_last_mile(order: dict, user: dict):
         shop = await db.shops.find_one({"id": order["shop_id"]})
         await _apply_delivered(order, shop)
         if shop:
-            await send_message(shop["owner_id"], "merchant_order_delivered", {"ref": order["ref"]}, "/merchant/orders", "ORDER_UPDATE")
-        await send_message(order["customer_id"], "client_order_delivered", {"ref": order["ref"]}, "/account/orders", "ORDER_UPDATE")
-        if order.get("carrier_id"):
-            await send_to_users({"role": "CARRIER_AGENT", "carrier_id": order["carrier_id"], "status": "ACTIVE"},
-                                "carrier_parcel_delivered", {"ref": order["ref"]}, "/partner", "PARCEL")
+            await send_message(shop["owner_id"], "merchant_order_delivered", {"ref": order["ref"]},
+                               f"/merchant/orders?order_id={order['id']}", "ORDER_UPDATE")
+            await send_message(order["customer_id"], "client_order_delivered", {"ref": order["ref"]},
+                               f"/account/orders?order_id={order['id']}", "ORDER_UPDATE")
+            if order.get("carrier_id"):
+                await send_to_users({"role": "CARRIER_AGENT", "carrier_id": order["carrier_id"], "status": "ACTIVE"},
+                                    "carrier_parcel_delivered", {"ref": order["ref"]},
+                                    f"/partner/parcels?order_id={order['id']}", "PARCEL")
 
 
 # ---------------- Module 3: Product moderation & reports (signalements) ----------------
@@ -2991,7 +3002,8 @@ async def _execute_approval(appr: dict, approver: dict):
             await db.withdrawal_requests.update_one({"id": wid}, {"$set": {
                 "status": "TRAITE", "debited": True, "double_validated": True,
                 "reference": p.get("reference", "")}})
-            await notify(w["user_id"], "WITHDRAWAL", "Retrait", "Votre retrait a été traité (TRAITE).")
+            await notify(w["user_id"], "WITHDRAWAL", "Retrait", "Votre retrait a été traité (TRAITE).",
+                         "/account/withdrawals")
     elif kind == "DELETE_MERCHANT":
         uid = appr["target_id"]
         await db.users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "DISABLED"}, "$inc": {"token_version": 1}})

@@ -185,7 +185,8 @@ async def contact_confirm(req: ContactConfirmReq, user: dict = Depends(get_curre
     else:
         await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"phone": ch["value"], "phone_verified": True}})
     await notify(user["id"], "SECURITY", "Coordonnées modifiées",
-                 f"Votre {'adresse e-mail' if ch['kind'] == 'email' else 'numéro de téléphone'} a été mis à jour.")
+                 f"Votre {'adresse e-mail' if ch['kind'] == 'email' else 'numéro de téléphone'} a été mis à jour.",
+                 "/account/profile")
     await audit_log(user, "CHANGE_" + ch["kind"].upper(), "user", user["id"], None, ch["value"])
     return out
 
@@ -319,7 +320,8 @@ async def admin_decide_deletion(rid: str, req: DecisionReq, user: dict = Depends
     if req.decision == "REJECT":
         await db.account_deletion_requests.update_one({"id": rid}, {"$set": {
             "status": "REJECTED", "decided_at": now_iso(), "reject_note": (req.note or "").strip()[:500], "rejected_by": user["id"]}})
-        await notify(r["user_id"], "ACCOUNT", "Demande de suppression refusée", req.note or "Votre demande de suppression a été refusée.")
+        await notify(r["user_id"], "ACCOUNT", "Demande de suppression refusée",
+                     req.note or "Votre demande de suppression a été refusée.", "/account/security")
         await audit_log(user, "REJECT_ACCOUNT_DELETION", "user", r["user_id"], None, req.note)
         return {"message": "Demande refusée"}
     if not any(d["by"] == user["id"] for d in r.get("downloads", [])):
@@ -347,7 +349,8 @@ async def admin_decide_deletion(rid: str, req: DecisionReq, user: dict = Depends
                "Si vous avez changé d'avis, ignorez cet e-mail ou annulez la demande depuis votre compte."],
               (link, "Confirmer la suppression de mon compte"))
     await notify(r["user_id"], "ACCOUNT", "Suppression approuvée",
-                 "Un e-mail vous a été envoyé pour confirmer vous-même la suppression définitive de votre compte.")
+                 "Un e-mail vous a été envoyé pour confirmer vous-même la suppression définitive de votre compte.",
+                 "/account/security")
     return {"message": "Demande approuvée par 2 administrateurs. E-mail de confirmation envoyé à l'utilisateur."}
 
 
@@ -452,7 +455,8 @@ async def admin_decide_restore(rid: str, req: DecisionReq, user: dict = Depends(
         raise HTTPException(status_code=404, detail="Demande introuvable ou déjà traitée")
     if req.decision == "REJECT":
         await db.account_restore_requests.update_one({"id": rid}, {"$set": {"status": "REJECTED", "decided_at": now_iso()}})
-        await notify(r["new_user_id"], "ACCOUNT", "Restauration refusée", "La restauration de votre ancien compte a été refusée.")
+        await notify(r["new_user_id"], "ACCOUNT", "Restauration refusée",
+                     "La restauration de votre ancien compte a été refusée.", "/account/security")
         await audit_log(user, "REJECT_ACCOUNT_RESTORE", "user", r["old_user_id"], None, req.note)
         return {"message": "Restauration refusée"}
     res = await db.account_restore_requests.find_one_and_update(
