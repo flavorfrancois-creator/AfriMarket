@@ -1152,6 +1152,17 @@ export function AdminSecurity() {
                 ))}
               </div>
             </div>
+            {s.two_factor_delivery_disabled && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 space-y-2" data-testid="twofa-delivery-disabled">
+                <p className="text-sm">
+                  La 2FA a été désactivée automatiquement pour tous les comptes, car aucun code n’a pu être envoyé.
+                  Vérifiez qu’un service d’envoi fonctionne avant de la réactiver.
+                </p>
+                <Button variant="outline" size="sm" onClick={() => save({ two_factor_delivery_disabled: false })} data-testid="twofa-reactivate">
+                  Réactiver la 2FA globale
+                </Button>
+              </div>
+            )}
             <div>
               <Label>Seuil de double-validation (remboursement / retrait)</Label>
               <div className="flex gap-2 mt-1">
@@ -1240,6 +1251,11 @@ export function AdminSecurity() {
             <span>Activer la 2FA sur mon compte</span>
             <Switch checked={!!pref.enabled} onCheckedChange={(v) => savePref({ enabled: v })} data-testid="my-2fa-toggle" />
           </label>
+          {["ADMIN", "SUPER_ADMIN"].includes(user?.role) && (
+            <p className="text-xs text-muted-foreground">
+              Pour les administrateurs, la 2FA est désactivée par défaut. Vous pouvez l’activer ici après connexion.
+            </p>
+          )}
           <div>
             <Label>Canal de réception</Label>
             <Select value={pref.channel} onValueChange={(v) => savePref({ channel: v })}>

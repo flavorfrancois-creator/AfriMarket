@@ -106,6 +106,7 @@ class StaffUpdateReq(BaseModel):
 class SettingsReq(BaseModel):
     two_factor_scope: Optional[str] = None
     two_factor_channels: Optional[List[str]] = None
+    two_factor_delivery_disabled: Optional[bool] = None
     refund_threshold: Optional[float] = None
     default_commission_rate: Optional[float] = None
     category_commissions: Optional[dict] = None
@@ -362,7 +363,10 @@ def _user_public(user: dict) -> dict:
         "status": user.get("status", "ACTIVE"),
         "shop_ids": user.get("shop_ids", []),
         "delegation": user.get("delegation") or {},
-        "two_factor_enabled": user.get("two_factor_enabled", False),
+        "two_factor_enabled": bool(
+            user.get("two_factor_enabled", False)
+            and (user.get("role") not in ("ADMIN", "SUPER_ADMIN") or user.get("two_factor_admin_opt_in"))
+        ),
         "two_factor_channel": user.get("two_factor_channel", "email"),
         "permissions": sorted(effective_permissions(user)),
         "relay_point_id": user.get("relay_point_id"),
@@ -428,12 +432,13 @@ async def _create_otp_challenge(user: dict, channel: str) -> tuple:
 
 async def _deliver_otp(user: dict, channel: str, code: str):
     if channel == "email":
-        await send_2fa_code(user["email"], code, user.get("language") or "fr", user.get("name", ""))
-    else:
-        # SMS / WhatsApp: provider chosen by country; sending is SIMULATED (code shown in logs).
-        msg = await messaging.render("auth_otp", user.get("language") or "fr", {"code": code, "name": user.get("name", "")})
-        await send_sms_like(channel, user.get("phone", ""), user.get("country", ""),
-                            msg["body"] if msg else code, purpose="otp")
+        return await send_2fa_code(user["email"], code, user.get("language") or "fr", user.get("name", ""))
+    msg = await messaging.render("auth_otp", user.get("language") or "fr", {"code": code, "name": user.get("name", "")})
+    if not msg:
+        return False
+    status = await send_sms_like(channel, user.get("phone", ""), user.get("country", ""),
+                                 msg["body"], purpose="otp")
+    return status == "RELAY_QUEUED"
 
 
 # ---------------- Auth ----------------
@@ -557,12 +562,21 @@ async def login(req: LoginReq, request: Request):
     settings = await get_settings()
     if requires_2fa(user, settings):
         enabled = settings.get("two_factor_channels") or ["email"]
-        channel = user.get("two_factor_channel", "email")
-        if channel not in enabled:
-            channel = enabled[0]
+        preferred = user.get("two_factor_channel", "email")
+        channels = ([preferred] if preferred in enabled else []) + [c for c in enabled if c != preferred]
+        channel = channels[0]
         cid, code = await _create_otp_challenge(user, channel)
-        await _deliver_otp(user, channel, code)
-        return {"require_2fa": True, "challenge_id": cid, "channel": channel}
+        for channel in channels:
+            if await _deliver_otp(user, channel, code):
+                if channel != channels[0]:
+                    await db.otp_challenges.update_one({"id": cid}, {"$set": {"channel": channel}})
+                return {"require_2fa": True, "challenge_id": cid, "channel": channel}
+        await db.otp_challenges.delete_one({"id": cid})
+        await db.platform_settings.update_one(
+            {"_id": "global"}, {"$set": {"two_factor_delivery_disabled": True}}, upsert=True
+        )
+        logger.warning("2FA globally disabled after all configured OTP delivery channels failed")
+        settings["two_factor_delivery_disabled"] = True
 
     await _record_login(user, request)
     token = create_access_token(str(user["_id"]), email, user["role"], user.get("token_version", 0))
@@ -3130,6 +3144,8 @@ async def admin_put_settings(req: SettingsReq, request: Request, user: dict = De
         if req.two_factor_scope not in ("NONE", "STAFF", "ALL"):
             raise HTTPException(status_code=400, detail="Portée 2FA invalide")
         upd["two_factor_scope"] = req.two_factor_scope
+    if req.two_factor_delivery_disabled is not None:
+        upd["two_factor_delivery_disabled"] = bool(req.two_factor_delivery_disabled)
     if req.two_factor_channels is not None:
         chans = [c for c in req.two_factor_channels if c in ("email", "sms", "whatsapp")]
         if not chans:
@@ -3237,8 +3253,11 @@ async def request_delete_merchant(user_id: str, request: Request, user: dict = D
 @api.put("/auth/2fa")
 async def set_2fa_pref(req: TwoFAPrefReq, user: dict = Depends(get_current_user)):
     channel = req.channel if req.channel in ("email", "sms", "whatsapp") else "email"
+    update = {"two_factor_enabled": bool(req.enabled), "two_factor_channel": channel}
+    if user.get("role") in ("ADMIN", "SUPER_ADMIN"):
+        update["two_factor_admin_opt_in"] = bool(req.enabled)
     await db.users.update_one({"_id": ObjectId(user["id"])},
-                              {"$set": {"two_factor_enabled": bool(req.enabled), "two_factor_channel": channel}})
+                              {"$set": update})
     return {"message": "Préférences 2FA mises à jour", "two_factor_enabled": bool(req.enabled), "two_factor_channel": channel}
 
 

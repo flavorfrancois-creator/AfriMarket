@@ -122,6 +122,7 @@ DEFAULT_SETTINGS = {
     "_id": "global",
     "two_factor_scope": "NONE",          # NONE | STAFF | ALL
     "two_factor_channels": ["email"],     # subset of email|sms|whatsapp
+    "two_factor_delivery_disabled": False,
     "refund_threshold": 100000.0,         # amount above which double-validation applies
     "default_commission_rate": 0.05,      # platform commission (0.05 = 5%)
     "category_commissions": {},           # {category_name: rate} overrides
@@ -166,6 +167,10 @@ async def get_settings() -> dict:
 
 
 def requires_2fa(user: dict, settings: dict) -> bool:
+    if settings.get("two_factor_delivery_disabled"):
+        return False
+    if user.get("role") in ("ADMIN", "SUPER_ADMIN"):
+        return bool(user.get("two_factor_enabled") and user.get("two_factor_admin_opt_in"))
     if user.get("two_factor_enabled"):
         return True
     scope = settings.get("two_factor_scope", "NONE")
