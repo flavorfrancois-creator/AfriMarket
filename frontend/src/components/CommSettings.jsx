@@ -176,6 +176,8 @@ export function SmsRelaysTab({ countries }) {
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [revealedKeys, setRevealedKeys] = useState({});
+  const [passwordRelayId, setPasswordRelayId] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
   const load = async () => {
@@ -203,6 +205,25 @@ export function SmsRelaysTab({ countries }) {
   const setStatus = async (relay, status) => {
     try {
       await api.put(`/admin/comm/relays/${relay.id}`, { status });
+      await load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const changePassword = async (relay) => {
+    try {
+      await api.put(`/admin/comm/relays/${relay.id}/password`, { password: newPassword });
+      setNewPassword("");
+      setPasswordRelayId("");
+      toast.success("Mot de passe modifié. Le téléphone devra se reconnecter.");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const deleteRelay = async (relay) => {
+    if (!window.confirm(`Supprimer le compte relais ${relay.phone} ? Ses affectations SIM et son historique SMS seront également supprimés.`)) return;
+    try {
+      await api.delete(`/admin/comm/relays/${relay.id}`);
+      setRevealedKeys((keys) => { const next = { ...keys }; delete next[relay.id]; return next; });
+      toast.success("Compte téléphone relais supprimé");
       await load();
     } catch (e) { toast.error(apiErr(e)); }
   };
@@ -257,10 +278,21 @@ export function SmsRelaysTab({ countries }) {
                 <div className="text-xs text-muted-foreground">Vu : {relay.last_seen ? new Date(relay.last_seen).toLocaleString("fr-FR") : "jamais"} · {relay.status === "ACTIVE" ? "Actif" : "Suspendu"}</div>
               </div>
               <Button size="sm" variant="outline" className="rounded-full" onClick={() => rotateKey(relay)} data-testid={`relay-rotate-key-${relay.id}`}>Nouvelle clé</Button>
+              <Button size="sm" variant="outline" className="rounded-full" onClick={() => { setPasswordRelayId(passwordRelayId === relay.id ? "" : relay.id); setNewPassword(""); }} data-testid={`relay-change-password-${relay.id}`}>Modifier le mot de passe</Button>
+              <Button size="sm" variant="destructive" className="rounded-full" onClick={() => deleteRelay(relay)} data-testid={`relay-delete-${relay.id}`}><Trash2 className="w-3.5 h-3.5 mr-1" /> Supprimer</Button>
               <Button size="sm" variant={relay.status === "ACTIVE" ? "destructive" : "outline"} className="rounded-full" onClick={() => setStatus(relay, relay.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE")} data-testid={`relay-status-${relay.id}`}>
                 {relay.status === "ACTIVE" ? "Suspendre" : "Réactiver"}
               </Button>
             </div>
+            {passwordRelayId === relay.id && (
+              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border p-3">
+                <div className="flex-1 min-w-[220px]">
+                  <Label htmlFor={`relay-new-password-${relay.id}`}>Nouveau mot de passe (8 caractères minimum)</Label>
+                  <Input id={`relay-new-password-${relay.id}`} type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} data-testid={`relay-new-password-${relay.id}`} />
+                </div>
+                <Button size="sm" className="rounded-full" disabled={newPassword.length < 8} onClick={() => changePassword(relay)} data-testid={`relay-save-password-${relay.id}`}>Enregistrer le mot de passe</Button>
+              </div>
+            )}
             {revealedKeys[relay.id] && (
               <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-950">
                 Clé de connexion à transmettre au téléphone (affichée une seule fois) :

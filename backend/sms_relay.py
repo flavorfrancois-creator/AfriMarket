@@ -31,6 +31,10 @@ class RelayStatusReq(BaseModel):
     status: str
 
 
+class RelayPasswordReq(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
 class RelayLoginReq(BaseModel):
     phone: str
     password: str
@@ -156,6 +160,31 @@ async def update_relay(relay_id: str, req: RelayStatusReq, user: dict = Depends(
         await db.sms_relay_accounts.update_one({"id": relay_id}, {"$inc": {"token_version": 1}})
     await audit_log(user, "UPDATE_SMS_RELAY", "sms_relay", relay_id, relay.get("status"), req.status)
     return {"relay": _public_relay(await db.sms_relay_accounts.find_one({"id": relay_id}))}
+
+
+@router.put("/admin/comm/relays/{relay_id}/password")
+async def change_relay_password(relay_id: str, req: RelayPasswordReq, user: dict = Depends(require_module("settings"))):
+    relay = await db.sms_relay_accounts.find_one({"id": relay_id})
+    if not relay:
+        raise HTTPException(status_code=404, detail="Compte relais introuvable")
+    await db.sms_relay_accounts.update_one(
+        {"id": relay_id},
+        {"$set": {"password_hash": hash_password(req.password)}, "$inc": {"token_version": 1}},
+    )
+    await audit_log(user, "CHANGE_SMS_RELAY_PASSWORD", "sms_relay", relay_id, None, "password changed")
+    return {"message": "Mot de passe modifié"}
+
+
+@router.delete("/admin/comm/relays/{relay_id}")
+async def delete_relay(relay_id: str, user: dict = Depends(require_module("settings"))):
+    relay = await db.sms_relay_accounts.find_one({"id": relay_id})
+    if not relay:
+        raise HTTPException(status_code=404, detail="Compte relais introuvable")
+    await audit_log(user, "DELETE_SMS_RELAY", "sms_relay", relay_id, relay["phone"], None)
+    await db.sms_relay_routes.delete_many({"relay_id": relay_id})
+    await db.sms_relay_accounts.delete_one({"id": relay_id})
+    await db.sms_relay_messages.delete_many({"relay_id": relay_id})
+    return {"message": "Compte relais supprimé"}
 
 
 @router.post("/admin/comm/relays/{relay_id}/rotate-key")
