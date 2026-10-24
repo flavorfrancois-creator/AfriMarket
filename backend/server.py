@@ -70,6 +70,12 @@ class LoginReq(BaseModel):
     password: str
 
 
+@api.get("/health")
+async def health():
+    await db.command("ping")
+    return {"status": "ok"}
+
+
 class VerifyReq(BaseModel):
     code: str
 
