@@ -162,6 +162,7 @@ export function Register() {
   const [countries, setCountries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [pendingMsg, setPendingMsg] = useState("");
   const [partner, setPartner] = useState({ relay_point_id: "", carrier_id: "", name: "", city: "", address: "" });
   const isPartner = form.role === "RELAY_MANAGER" || form.role === "CARRIER_AGENT";
@@ -171,16 +172,19 @@ export function Register() {
   }, []);
 
   const upd = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-  const selectedCurrency = countries.find((c) => c.name === form.country)?.currency;
+  const selectedCountry = countries.find((c) => c.name === form.country);
+  const selectedCurrency = selectedCountry?.currency;
 
   const submit = async (e) => {
     e.preventDefault();
     setError("");
+    if (!form.country) { setError("Veuillez sélectionner votre pays."); return; }
+    if (!acceptedTerms) { setError("Veuillez accepter les conditions d’utilisation."); return; }
     if (form.password !== form.confirm) { setError("Les mots de passe ne correspondent pas"); return; }
     setLoading(true);
     try {
       const { data } = await api.post("/auth/register", {
-        name: form.name, email: form.email, phone: form.phone, password: form.password,
+        name: form.name, email: form.email, phone: form.phone ? `${selectedCountry.phone_code}${form.phone}` : "", password: form.password,
         role: form.role, country: form.country, invite_code: form.invite_code || null, language: lang,
         ...(form.role === "RELAY_MANAGER" ? (partner.relay_point_id ? { relay_point_id: partner.relay_point_id }
           : { proposed_relay: { name: partner.name, city: partner.city, address: partner.address } }) : {}),
@@ -222,16 +226,6 @@ export function Register() {
           <Label>{t("name")}</Label>
           <Input value={form.name} onChange={(e) => upd("name", e.target.value)} required data-testid="reg-name" className="mt-1" />
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label>{t("email")}</Label>
-            <Input type="email" value={form.email} onChange={(e) => upd("email", e.target.value)} required data-testid="reg-email" className="mt-1" />
-          </div>
-          <div>
-            <Label>{t("phone")}</Label>
-            <Input value={form.phone} onChange={(e) => upd("phone", e.target.value)} placeholder="+221..." data-testid="reg-phone" className="mt-1" />
-          </div>
-        </div>
         <div>
           <Label>{t("country")}</Label>
           <Select value={form.country} onValueChange={(v) => upd("country", v)}>
@@ -243,6 +237,23 @@ export function Register() {
             </SelectContent>
           </Select>
           {selectedCurrency && <div className="text-xs text-muted-foreground mt-1">Monnaie : {selectedCurrency}</div>}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label>{t("email")}</Label>
+            <Input type="email" value={form.email} onChange={(e) => upd("email", e.target.value)} required data-testid="reg-email" className="mt-1" />
+          </div>
+          <div>
+            <Label>{t("phone")}</Label>
+            <div className="flex mt-1">
+              <span className="inline-flex items-center rounded-l-md border border-r-0 border-input bg-muted px-3 text-sm text-muted-foreground" data-testid="reg-phone-code">
+                {selectedCountry?.phone_code || "+"}
+              </span>
+              <Input value={form.phone} onChange={(e) => upd("phone", e.target.value.replace(/\D/g, ""))}
+                inputMode="tel" placeholder={selectedCountry ? "Numéro de téléphone" : "Choisissez un pays"}
+                disabled={!selectedCountry} data-testid="reg-phone" className="rounded-l-none" />
+            </div>
+          </div>
         </div>
         {isPartner && <PartnerFields role={form.role} country={form.country} partner={partner} setPartner={setPartner} />}
         <div className="grid grid-cols-2 gap-3">
@@ -260,6 +271,13 @@ export function Register() {
           <Input value={form.invite_code} onChange={(e) => upd("invite_code", e.target.value)} placeholder="INVITE-XXXXXX" data-testid="reg-invite" className="mt-1" />
         </div>}
         {error && <div className="text-sm text-destructive" data-testid="reg-error">{error}</div>}
+        <label className="flex items-start gap-2 text-sm leading-relaxed" data-testid="reg-terms-label">
+          <input type="checkbox" checked={acceptedTerms} onChange={(e) => setAcceptedTerms(e.target.checked)}
+            required data-testid="reg-terms" className="mt-1 accent-primary" />
+          <span>
+            J’accepte les <Link to="/terms" target="_blank" rel="noreferrer" className="text-primary underline">Conditions générales d’utilisation et de vente</Link> d’AfriMarket.
+          </span>
+        </label>
         <Button type="submit" className="w-full rounded-full h-11" disabled={loading} data-testid="reg-submit">
           {loading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}{t("register")}
         </Button>

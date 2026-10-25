@@ -713,9 +713,44 @@ async def get_currencies():
 
 # ---------------- Legal content (Module 7) ----------------
 LEGAL_KINDS = ["terms", "privacy", "faq", "contact", "mentions"]
+DEFAULT_TERMS_BODY = """Dernière mise à jour : 25 octobre 2026
+
+1. Objet et acceptation
+AfriMarket est une place de marché en ligne qui permet aux utilisateurs de découvrir des boutiques, de commander des produits et, sous réserve d’acceptation, de proposer des produits à la vente. En créant un compte ou en utilisant le site, vous acceptez les présentes conditions. Les règles impératives de protection des consommateurs applicables dans votre pays restent pleinement applicables.
+
+2. Rôle de la plateforme
+Sauf indication contraire lors d’une commande, le vendeur identifié sur la fiche produit est le vendeur du produit et reste responsable de sa description, de sa disponibilité, de son emballage, de sa conformité et de l’exécution de la vente. AfriMarket fournit des outils de mise en relation, de commande, de paiement ou de suivi selon les services disponibles ; elle n’est pas le fabricant ni le vendeur des produits proposés par les boutiques tierces. Les informations de la commande précisent les parties à la vente et les éventuels services fournis par AfriMarket.
+
+3. Compte et sécurité
+Vous devez fournir des informations exactes et à jour, protéger vos identifiants et nous signaler toute utilisation non autorisée. Vous êtes responsable des opérations réalisées depuis votre compte, sous réserve des règles légales applicables. Un compte est personnel ; les comptes marchands doivent être créés par une personne habilitée à engager l’activité concernée. AfriMarket peut demander des vérifications raisonnables, notamment d’identité ou d’activité, avant d’activer certaines fonctions.
+
+4. Commandes, prix et paiement
+Les prix, la devise, les frais de livraison, taxes ou droits éventuels et le total estimé sont affichés avant validation de la commande, dans la mesure où ces montants sont connus. Le client vérifie sa commande avant de la confirmer. Une commande n’est acceptée qu’après la confirmation affichée par le site ou le vendeur. Le paiement est traité par le moyen proposé au moment de l’achat ; l’utilisation d’un prestataire de paiement peut être soumise à ses propres conditions. Ne communiquez jamais votre code secret Mobile Money ou mot de passe au vendeur ou au support. Les frais douaniers et taxes à l’importation, lorsqu’ils s’appliquent, sont à la charge de la partie indiquée au paiement et conformément au droit applicable.
+
+5. Livraison, réclamations et retours
+Les délais et modalités de livraison sont ceux indiqués lors de la commande et peuvent varier selon le pays, le transporteur et les circonstances. Le client doit fournir une adresse et des coordonnées exactes. En cas de retard, colis manquant, produit endommagé, non conforme ou différent de la commande, contactez le vendeur via les outils de la plateforme et conservez les justificatifs. Les retours, annulations, remboursements et garanties sont soumis aux informations présentées avant l’achat et aux droits impératifs du consommateur de son pays ; rien dans ces conditions ne supprime ces droits.
+
+6. Règles applicables aux vendeurs
+Le vendeur doit fournir des descriptions, prix, stocks et informations exacts, respecter les lois et obligations fiscales applicables, livrer les produits commandés et traiter les réclamations conformément au droit applicable. Il garantit disposer des droits nécessaires pour vendre les produits et ne pas proposer d’articles interdits, contrefaits, dangereux ou soumis à restriction sans autorisation. AfriMarket peut modérer une annonce, suspendre une boutique ou limiter un compte en cas de risque, de fraude, de violation de ces conditions ou d’obligation légale ; lorsque cela est approprié, le vendeur peut demander un réexamen.
+
+7. Usages interdits
+Il est interdit d’utiliser le site pour frauder, usurper une identité, contourner un paiement, publier un contenu illicite ou trompeur, porter atteinte aux droits d’autrui, perturber le service ou collecter les données d’autres utilisateurs sans autorisation. Les produits et activités interdits par la loi applicable ne peuvent pas être proposés ou achetés.
+
+8. Disponibilité et responsabilité
+AfriMarket cherche à assurer le bon fonctionnement du service, sans garantir une disponibilité continue ni l’absence d’erreurs. La plateforme peut être temporairement interrompue pour maintenance, sécurité ou raison technique. Dans la mesure permise par la loi, AfriMarket n’est pas responsable des actes ou omissions indépendants des vendeurs, transporteurs ou prestataires de paiement ; cette clause ne limite pas les responsabilités qui ne peuvent légalement être exclues, notamment en cas de faute, de dommage corporel ou de droits impératifs du consommateur.
+
+9. Données personnelles et propriété intellectuelle
+Les données sont traitées conformément à la Politique de confidentialité accessible sur le site. Les contenus et éléments de la plateforme sont protégés par les droits applicables. En publiant une annonce, le vendeur autorise AfriMarket à afficher et promouvoir le contenu dans le cadre du fonctionnement du service, sans transfert de propriété intellectuelle.
+
+10. Réclamations, suspension et modification
+Pour toute question ou réclamation, utilisez les coordonnées de contact publiées sur le site et indiquez la référence de commande si nécessaire. AfriMarket peut mettre à jour ces conditions pour refléter l’évolution du service ou du droit. La version applicable est celle présentée au moment de l’utilisation ou de la commande, sous réserve des règles de notification imposées par la loi. Les dispositions invalides sont écartées dans la seule mesure nécessaire, sans affecter les autres.
+
+11. Droit applicable
+Les présentes conditions sont soumises aux lois applicables dans le pays concerné, sans priver les consommateurs des protections impératives dont ils bénéficient. Les parties peuvent rechercher une solution amiable avant de saisir les autorités ou tribunaux compétents selon les règles applicables."""
+
 LEGAL_DEFAULTS = {
-    "terms": {"title": "Conditions générales",
-              "body": "Plateforme de démonstration. Les transactions sont simulées et n'engagent aucune valeur réelle."},
+    "terms": {"title": "Conditions générales d’utilisation et de vente",
+              "body": DEFAULT_TERMS_BODY},
     "privacy": {"title": "Politique de confidentialité",
                 "body": "Vos données sont utilisées uniquement pour le fonctionnement de la démonstration. Les documents d'identité (KYC) sont protégés et accessibles uniquement aux administrateurs autorisés."},
     "faq": {"title": "FAQ",
@@ -735,6 +770,9 @@ def _merged_legal(settings: dict) -> dict:
         s = stored.get(k) or {}
         title = (s.get("title") or "").strip() or d["title"]
         body = (s.get("body") or "").strip() or d["body"]
+        if k == "terms" and body == "Plateforme de démonstration. Les transactions sont simulées et n'engagent aucune valeur réelle.":
+            body = d["body"]
+            title = d["title"]
         out[k] = {"title": title, "body": body}
     return out
 
