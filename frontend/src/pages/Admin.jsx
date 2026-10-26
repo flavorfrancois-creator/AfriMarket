@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CrossBorderSettings } from "@/components/CrossBorderSettings";
 import { AdminCountryApis } from "@/components/AdminCountryApis";
-import api, { apiErr, downloadFile } from "@/lib/api";
+import api, { apiErr, downloadFile, uploadImage } from "@/lib/api";
 import { money } from "@/lib/currency";
 import { useI18n } from "@/lib/i18n";
 import { useAuth } from "@/context/AuthContext";
@@ -477,12 +477,13 @@ export function AdminShops() {
   );
 }
 
+const userHasProfile = (user, profile) => (user.profiles || [user.role]).includes(profile);
 const USER_GROUPS = [
-  ["CLIENT", "Clients", (u) => u.role === "CLIENT"],
-  ["MERCHANT", "Boutiques", (u) => u.role === "MERCHANT"],
-  ["CARRIER_AGENT", "Transporteurs", (u) => u.role === "CARRIER_AGENT"],
-  ["RELAY_MANAGER", "Points relais", (u) => u.role === "RELAY_MANAGER"],
-  ["STAFF", "Administration", (u) => !["CLIENT", "MERCHANT", "CARRIER_AGENT", "RELAY_MANAGER"].includes(u.role)],
+  ["CLIENT", "Clients", (u) => userHasProfile(u, "CLIENT")],
+  ["MERCHANT", "Boutiques", (u) => userHasProfile(u, "MERCHANT")],
+  ["CARRIER_AGENT", "Transporteurs", (u) => userHasProfile(u, "CARRIER_AGENT")],
+  ["RELAY_MANAGER", "Points relais", (u) => userHasProfile(u, "RELAY_MANAGER")],
+  ["STAFF", "Administration", (u) => !["CLIENT", "MERCHANT", "CARRIER_AGENT", "RELAY_MANAGER"].some((profile) => userHasProfile(u, profile))],
 ];
 
 function OnlineDot({ u }) {
@@ -541,13 +542,13 @@ export function AdminUsers() {
               <TableRow key={u.id} data-testid={`admin-user-${u.id}`}>
                 <TableCell className="font-medium text-sm">{u.name} {u.is_demo && <span className="text-[10px] bg-muted px-1 rounded">DEMO</span>}</TableCell>
                 <TableCell className="text-sm">{u.email}</TableCell>
-                <TableCell><span className="text-xs font-mono bg-accent px-2 py-0.5 rounded-full">{u.role}</span></TableCell>
+                <TableCell><span className="text-xs font-mono bg-accent px-2 py-0.5 rounded-full">{(u.profiles || [u.role]).join(" · ")}</span></TableCell>
                 <TableCell><OnlineDot u={u} /></TableCell>
                 <TableCell><StatusBadge status={u.status || "ACTIVE"} /></TableCell>
                 <TableCell className="text-sm">{u.country || "—"}</TableCell>
-                <TableCell>{u.role === "MERCHANT" ? <StatusBadge status={u.kyc_status} /> : "—"}</TableCell>
+                <TableCell>{userHasProfile(u, "MERCHANT") ? <StatusBadge status={u.kyc_status} /> : "—"}</TableCell>
                 <TableCell>
-                  {adminLevel && u.role === "MERCHANT" && (u.status || "ACTIVE") === "ACTIVE" && (
+                  {adminLevel && userHasProfile(u, "MERCHANT") && (u.status || "ACTIVE") === "ACTIVE" && (
                     <Button size="sm" variant="ghost" className="text-destructive rounded-full" onClick={() => delMerchant(u)} data-testid={`del-merchant-${u.id}`}>
                       <Trash2 className="w-4 h-4 mr-1" /> Supprimer
                     </Button>
@@ -732,6 +733,7 @@ export function AdminGlobalSettings() {
   };
   const LEGAL = [
     { key: "terms", label: "Conditions générales (CGU/CGV)" },
+    { key: "merchant_terms", label: "Conditions commerçant" },
     { key: "privacy", label: "Politique de confidentialité" },
     { key: "mentions", label: "Mentions légales" },
     { key: "faq", label: "FAQ" },
@@ -743,12 +745,28 @@ export function AdminGlobalSettings() {
   const [countries, setCountries] = useState([]);
   const [csvImport, setCsvImport] = useState(false);
   const [nt, setNt] = useState({ country: "", zone: "", rate: "", label: "TVA", enabled: true });
+  const [storefront, setStorefront] = useState({
+    homepage_images: [],
+    homepage_ads: { above_hero: false, below_hero: true, show_promotions: true, show_popular: false },
+    daily_offer_duration_hours: 24,
+  });
+  const [durationDraft, setDurationDraft] = useState(24);
 
   const loadTaxes = () => api.get("/admin/taxes").then((r) => { setTaxes(r.data.taxes); setTaxesEnabled(r.data.taxes_enabled); }).catch(() => {});
   useEffect(() => {
     api.get("/legal").then((r) => setLegal(r.data.content)).catch(() => setLegal({}));
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
-    api.get("/admin/settings").then((r) => setCsvImport(!!r.data.settings?.csv_import_enabled)).catch(() => {});
+    api.get("/admin/settings").then((r) => {
+      const settings = r.data.settings || {};
+      setCsvImport(!!settings.csv_import_enabled);
+      const next = {
+        homepage_images: settings.homepage_images || [],
+        homepage_ads: { above_hero: false, below_hero: true, show_promotions: true, show_popular: false, ...(settings.homepage_ads || {}) },
+        daily_offer_duration_hours: settings.daily_offer_duration_hours || 24,
+      };
+      setStorefront(next);
+      setDurationDraft(next.daily_offer_duration_hours);
+    }).catch(() => {});
     loadTaxes();
   }, []);
 
@@ -766,6 +784,54 @@ export function AdminGlobalSettings() {
     setTaxesEnabled(v);
     try { await api.put("/admin/settings", { taxes_enabled: v }); toast.success("Paramètre taxes mis à jour"); }
     catch (e) { toast.error(apiErr(e)); }
+  };
+  const saveStorefront = async (patch) => {
+    try {
+      const { data } = await api.put("/admin/settings", patch);
+      const settings = data.settings || {};
+      setStorefront((current) => ({
+        ...current,
+        homepage_images: settings.homepage_images ?? current.homepage_images,
+        homepage_ads: settings.homepage_ads ?? current.homepage_ads,
+        daily_offer_duration_hours: settings.daily_offer_duration_hours ?? current.daily_offer_duration_hours,
+      }));
+      toast.success("Paramètres vitrine enregistrés");
+      return true;
+    } catch (e) {
+      toast.error(apiErr(e));
+      return false;
+    }
+  };
+  const uploadHomepageImages = async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    if (storefront.homepage_images.length + files.length > 10) {
+      toast.error("Maximum 10 images pour le carrousel.");
+      return;
+    }
+    try {
+      const images = [...storefront.homepage_images];
+      for (const file of files) images.push(await uploadImage(file));
+      await saveStorefront({ homepage_images: images });
+    } catch (e) {
+      toast.error(apiErr(e));
+    }
+  };
+  const removeHomepageImage = async (index) => {
+    const images = storefront.homepage_images.filter((_, i) => i !== index);
+    await saveStorefront({ homepage_images: images });
+  };
+  const toggleHomepageAd = async (key, value) => {
+    await saveStorefront({ homepage_ads: { ...storefront.homepage_ads, [key]: value } });
+  };
+  const saveOfferDuration = async () => {
+    const duration = Number(durationDraft);
+    if (!Number.isInteger(duration) || duration < 24 || duration > 336) {
+      toast.error("La durée doit être comprise entre 24 et 336 heures.");
+      return;
+    }
+    await saveStorefront({ daily_offer_duration_hours: duration });
   };
   const addTax = async () => {
     if (!nt.country || nt.rate === "") { toast.error("Pays et taux requis"); return; }
@@ -805,6 +871,61 @@ export function AdminGlobalSettings() {
             <span><span className="font-medium">Import CSV/Excel des produits</span><br /><span className="text-muted-foreground text-xs">Autoriser les commerçants à importer leurs produits en masse.</span></span>
             <Switch checked={csvImport} onCheckedChange={toggleCsvImport} data-testid="csv-import-toggle" />
           </label>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl p-5 space-y-5" data-testid="storefront-settings">
+          <div>
+            <h3 className="font-display font-bold mb-1">Vitrine publique</h3>
+            <p className="text-xs text-muted-foreground">Images d’accueil, bannières produits et durée des offres du jour.</p>
+          </div>
+          <div>
+            <Label htmlFor="homepage-images">Images du carrousel d’accueil (10 maximum)</Label>
+            <input id="homepage-images" type="file" accept="image/*" multiple onChange={uploadHomepageImages} className="mt-2 block w-full text-sm" data-testid="homepage-image-upload" />
+            {storefront.homepage_images.length > 0 && (
+              <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3">
+                {storefront.homepage_images.map((image, index) => (
+                  <div key={`${image}-${index}`} className="relative">
+                    <img src={image} alt={`Image d’accueil ${index + 1}`} className="w-full h-24 rounded-lg object-cover" />
+                    <Button type="button" variant="destructive" size="sm" className="absolute right-1 top-1 h-7 px-2" onClick={() => removeHomepageImage(index)} aria-label={`Supprimer l’image ${index + 1}`}>×</Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-3">
+              <Label>Placement des bannières publicitaires</Label>
+              {[
+                ["above_hero", "Au-dessus de l’image d’accueil"],
+                ["below_hero", "En dessous de l’image d’accueil"],
+              ].map(([key, label]) => (
+                <label key={key} className="flex items-center justify-between gap-3 text-sm">
+                  <span>{label}</span>
+                  <Switch checked={!!storefront.homepage_ads[key]} onCheckedChange={(value) => toggleHomepageAd(key, value)} data-testid={`homepage-ad-${key}`} />
+                </label>
+              ))}
+            </div>
+            <div className="space-y-3">
+              <Label>Produits affichés dans les bannières</Label>
+              {[
+                ["show_promotions", "Produits en promotion"],
+                ["show_popular", "Produits les plus sollicités"],
+              ].map(([key, label]) => (
+                <label key={key} className="flex items-center justify-between gap-3 text-sm">
+                  <span>{label}</span>
+                  <Switch checked={!!storefront.homepage_ads[key]} onCheckedChange={(value) => toggleHomepageAd(key, value)} data-testid={`homepage-ad-${key}`} />
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="max-w-sm">
+            <Label htmlFor="daily-offer-duration">Durée des offres activées (heures)</Label>
+            <div className="mt-1 flex gap-2">
+              <Input id="daily-offer-duration" type="number" min="24" max="336" step="24" value={durationDraft} onChange={(e) => setDurationDraft(e.target.value)} data-testid="daily-offer-duration" />
+              <Button type="button" onClick={saveOfferDuration} data-testid="save-daily-offer-duration">Enregistrer</Button>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">Valeur par défaut : 24 h. Maximum : 2 semaines. Le changement s’applique aux prochaines activations.</p>
+          </div>
         </div>
 
         {/* Legal editor */}

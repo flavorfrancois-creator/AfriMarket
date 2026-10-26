@@ -57,6 +57,16 @@ async def get_current_user(request: Request) -> dict:
             raise HTTPException(status_code=401, detail="Utilisateur introuvable")
         if payload.get("ver", 0) != user.get("token_version", 0):
             raise HTTPException(status_code=401, detail="Session expirée")
+        profiles = user.get("profiles")
+        if profiles:
+            active_profile = payload.get("role", user.get("role"))
+            if active_profile not in profiles:
+                raise HTTPException(status_code=401, detail="Profil de session invalide")
+        else:
+            profiles = [user.get("role")]
+            active_profile = user.get("role")
+        user["profiles"] = profiles
+        user["role"] = active_profile
         user["id"] = str(user["_id"])
         seen = user.get("last_seen")
         if not seen or seen < (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat():

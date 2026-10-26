@@ -19,7 +19,7 @@ import {
 import {
   MerchantLayout, MerchantOnboarding, MerchantOverview, MerchantProducts, MerchantOrders,
   MerchantCustomers, MerchantStock, MerchantStats, MerchantPromotions, MerchantLoyalty,
-  MerchantOpportunities, MerchantSettings,
+  MerchantOpportunities, MerchantSettings, MerchantDailyOffers,
 } from "@/pages/Merchant";
 import {
   AdminLayout, AdminOverview, AdminShops, AdminUsers, AdminWithdrawals, AdminOrders,
@@ -54,6 +54,7 @@ function App() {
                 <Route path="/faq" element={<StaticPage kind="faq" />} />
                 <Route path="/contact" element={<StaticPage kind="contact" />} />
                 <Route path="/terms" element={<StaticPage kind="terms" />} />
+                <Route path="/terms/merchant" element={<StaticPage kind="merchant_terms" />} />
                 <Route path="/privacy" element={<StaticPage kind="privacy" />} />
               </Route>
 
@@ -98,6 +99,7 @@ function App() {
                   <Route path="stats" element={<MerchantStats />} />
                   <Route path="loyalty" element={<MerchantLoyalty />} />
                   <Route path="promotions" element={<MerchantPromotions />} />
+                  <Route path="daily-offers" element={<MerchantDailyOffers />} />
                   <Route path="settings" element={<MerchantSettings />} />
                   <Route path="account" element={<AccountSettings />} />
                 </Route>

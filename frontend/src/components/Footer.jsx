@@ -13,7 +13,7 @@ export function Footer() {
       <div className="max-w-7xl mx-auto px-4 py-16 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-10">
         <div className="lg:col-span-2">
           <div className="flex items-center gap-2 mb-4">
-            <div className="w-9 h-9 rounded-xl bg-primary text-primary-foreground grid place-items-center font-display font-extrabold">A</div>
+            <img src="/africashop.png" alt="" className="w-9 h-9 rounded-xl object-contain" />
             <span className="font-display font-extrabold text-lg text-white">{t("app_name")}</span>
           </div>
           <p className="text-sm max-w-sm text-neutral-400">{t("tagline")}. Une plateforme e-commerce multi-boutiques pensée pour l'Afrique — multi-devises, Mobile Money et livraison locale.</p>

@@ -92,16 +92,27 @@ export function ShopDetail() {
   const { id } = useParams();
   const [shop, setShop] = useState(null);
   const [products, setProducts] = useState([]);
+  const [heroIndex, setHeroIndex] = useState(0);
   useEffect(() => {
     api.get(`/shops/${id}`).then((r) => setShop(r.data.shop)).catch(() => setShop(false));
     api.get("/products", { params: { shop_id: id } }).then((r) => setProducts(r.data.products)).catch(() => {});
   }, [id]);
+  useEffect(() => {
+    const images = shop?.homepage_images || [];
+    if (images.length < 2) return undefined;
+    const timer = window.setInterval(() => setHeroIndex((index) => (index + 1) % images.length), 5000);
+    return () => window.clearInterval(timer);
+  }, [shop?.homepage_images?.length]);
   if (shop === null) return <Loading full />;
   if (shop === false) return <div className="max-w-7xl mx-auto px-4 py-10"><EmptyState title="Boutique introuvable" /></div>;
+  const heroImages = shop.homepage_images || [];
+  const activeHeroIndex = heroImages.length ? heroIndex % heroImages.length : 0;
   return (
     <div>
-      <div className="bg-neutral-950 text-white">
-        <div className="max-w-7xl mx-auto px-4 py-12 flex items-center gap-5">
+      <div className="relative min-h-56 overflow-hidden bg-neutral-950 text-white">
+        {heroImages.length > 0 && <img src={heroImages[activeHeroIndex]} alt="" className="absolute inset-0 h-full w-full object-cover" />}
+        {heroImages.length > 0 && <div className="absolute inset-0 bg-neutral-950/65" />}
+        <div className="relative max-w-7xl mx-auto px-4 py-12 flex items-center gap-5">
           <img src={shop.logo} alt="" className="w-20 h-20 rounded-2xl object-cover border-2 border-white/20" />
           <div>
             <h1 className="text-2xl md:text-3xl font-display font-extrabold">{shop.name}</h1>
@@ -109,6 +120,15 @@ export function ShopDetail() {
             {shop.description && <p className="text-neutral-400 text-sm mt-2 max-w-xl">{shop.description}</p>}
           </div>
         </div>
+        {heroImages.length > 1 && (
+          <div className="absolute bottom-3 right-4 flex gap-2" aria-label="Images de la boutique">
+            {heroImages.map((image, index) => (
+              <button key={`${image}-${index}`} type="button" onClick={() => setHeroIndex(index)}
+                className={`h-2.5 w-2.5 rounded-full border border-white ${heroIndex === index ? "bg-white" : "bg-white/30"}`}
+                aria-label={`Afficher l’image ${index + 1}`} />
+            ))}
+          </div>
+        )}
       </div>
       <div className="max-w-7xl mx-auto px-4 py-10">
         <h2 className="font-display font-bold text-lg mb-5">Articles ({products.length})</h2>
@@ -169,8 +189,13 @@ export function ProductDetail() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-10 grid grid-cols-1 lg:grid-cols-2 gap-10">
       <div>
-        <div className="aspect-square rounded-2xl overflow-hidden bg-muted border border-border" data-testid="detail-hero-image">
+        <div className="relative aspect-square rounded-2xl overflow-hidden bg-muted border border-border" data-testid="detail-hero-image">
           {heroImg ? <img src={heroImg} alt={p.name} className="w-full h-full object-cover" /> : <div className="w-full h-full grid place-items-center text-muted-foreground"><Store className="w-10 h-10" /></div>}
+          {p.daily_offer_active && (
+            <span className={`absolute right-1/2 top-1/2 -translate-y-1/2 translate-x-1/2 rotate-[-12deg] whitespace-nowrap rounded-full px-4 py-2 text-base font-bold text-white shadow-lg ${Number(p.daily_offer?.discount_percent || 0) > 0 ? "bg-red-600/65" : "bg-amber-600/75"}`} data-testid="detail-daily-offer-badge">
+              ★ {Number(p.daily_offer?.discount_percent || 0) > 0 ? `-${p.daily_offer.discount_percent}%` : "Sélection qualité"} ★
+            </span>
+          )}
         </div>
         {gallery.length > 1 && (
           <div className="mt-3 flex gap-2 flex-wrap" data-testid="detail-gallery">
@@ -549,6 +574,15 @@ Pour toute question ou réclamation, utilisez les coordonnées de contact publi�
 
 11. Droit applicable
 Les présentes conditions sont soumises aux lois applicables dans le pays concerné, sans priver les consommateurs des protections impératives dont ils bénéficient. Les parties peuvent rechercher une solution amiable avant de saisir les autorités ou tribunaux compétents selon les règles applicables.` },
+  merchant_terms: { title: "Conditions commerçant", body: `Dernière mise à jour : 26 octobre 2026
+
+Ces conditions complètent les conditions générales AfriMarket. Le vendeur confirme être habilité à exercer son activité et s’engage à fournir des informations exactes sur son identité, ses boutiques, ses produits, ses prix et ses stocks. Il doit respecter les lois applicables, obtenir les autorisations professionnelles et fiscales nécessaires et ne proposer aucun produit illicite, contrefait, dangereux ou soumis à restriction sans autorisation.
+
+Le commerçant honore les commandes acceptées, respecte les délais de préparation et de livraison annoncés, répond aux clients et traite les réclamations, retours, garanties et remboursements selon les règles impératives applicables. Il ne demande pas au client de contourner les paiements proposés sur la plateforme. Les commissions, frais, versements et réserves applicables sont ceux affichés par AfriMarket.
+
+Un même profil commerçant peut gérer plusieurs boutiques. Chaque boutique doit avoir un nom et des informations propres. Le profil commerçant partage l’identité et les identifiants du compte client associé ; le commerçant reste responsable de l’utilisation de son compte et des activités de ses boutiques.
+
+Les données des clients ne peuvent être utilisées que pour traiter les commandes et respecter les obligations légales. AfriMarket peut demander des justificatifs, modérer les annonces ou suspendre une boutique en cas de risque, de fraude, de violation des conditions ou d’obligation légale ; un réexamen peut être demandé lorsque cela est permis. Le commerçant demeure responsable de ses produits, ventes, obligations fiscales et professionnelles. Les protections légales impératives prévalent sur toute clause contraire.` },
   privacy: { title: "Politique de confidentialité", body: "Vos données sont utilisées uniquement pour le fonctionnement de la démonstration. Les documents d'identité (KYC) sont protégés et accessibles uniquement aux administrateurs autorisés." },
   mentions: { title: "Mentions légales", body: "AfriMarket — plateforme de démonstration. Éditeur, hébergeur et informations légales à compléter." },
 };

@@ -9,6 +9,8 @@ export function ProductCard({ product, index = 0 }) {
   const { add } = useCart();
   const { fmt: money } = useFx();
   const promo = product.is_promo;
+  const dailyOffer = product.daily_offer_active ? product.daily_offer : null;
+  const dailyDiscount = Number(dailyOffer?.discount_percent || 0);
   return (
     <div
       className="group bg-card border border-border rounded-xl overflow-hidden card-lift stagger-in flex flex-col"
@@ -25,6 +27,15 @@ export function ProductCard({ product, index = 0 }) {
         {promo && (
           <span className="absolute top-2 left-2 bg-primary text-primary-foreground text-xs font-semibold px-2 py-1 rounded-full">
             PROMO
+          </span>
+        )}
+        {dailyOffer && (
+          <span
+            className={`absolute right-1/2 top-1/2 -translate-y-1/2 translate-x-1/2 rotate-[-12deg] whitespace-nowrap rounded-full px-4 py-2 text-base font-extrabold text-white shadow-lg ${dailyDiscount > 0 ? "bg-red-600/65" : "bg-amber-600/75"}`}
+            aria-label={dailyDiscount > 0 ? `Offre du jour : réduction de ${dailyDiscount} %` : "Sélection qualité du jour"}
+            data-testid={`daily-offer-badge-${product.id}`}
+          >
+            ★ {dailyDiscount > 0 ? `-${dailyDiscount}%` : "Qualité"} ★
           </span>
         )}
       </Link>

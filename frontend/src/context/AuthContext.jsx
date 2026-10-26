@@ -33,6 +33,12 @@ export function AuthProvider({ children }) {
     setUser(u);
   };
 
+  const switchProfile = async (profile) => {
+    const { data } = await api.post("/auth/switch-profile", { profile });
+    login(data.token, data.user);
+    return data.user;
+  };
+
   const logout = () => {
     const tk = localStorage.getItem("am_token");
     if (tk) api.post("/auth/logout", {}, { headers: { Authorization: `Bearer ${tk}` } }).catch(() => {});
@@ -44,7 +50,7 @@ export function AuthProvider({ children }) {
   const refresh = loadMe;
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, refresh, setUser }}>
+    <AuthContext.Provider value={{ user, token, login, logout, refresh, setUser, switchProfile }}>
       {children}
     </AuthContext.Provider>
   );

@@ -1,4 +1,11 @@
 crons:
+  - name: daily-offer-cycle
+    description: "Every 15 minutes: activate unanswered offers after 24h, expire deals, and propose the daily country rotation"
+    cron: "*/15 * * * *"
+    # Checks offer response deadlines frequently while generating only one product rotation per UTC day.
+    endpoint: "{{BASE_URL}}/api/cron/daily-offers"
+    method: POST
+    enabled: true
   - name: daily-reminders
     description: "Daily 8am UTC: uncollected relay parcels to relay points, late deliveries to carriers"
     cron: "0 8 * * *"

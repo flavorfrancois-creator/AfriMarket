@@ -2,6 +2,7 @@ import React from "react";
 import { Outlet, Navigate, useLocation } from "react-router-dom";
 import { PublicHeader } from "@/components/PublicHeader";
 import { Footer } from "@/components/Footer";
+import { VisitorConsent } from "@/components/VisitorConsent";
 import { useAuth } from "@/context/AuthContext";
 import { Loader2 } from "lucide-react";
 
@@ -15,6 +16,7 @@ export function PublicLayout() {
         <Outlet />
       </div>
       <Footer />
+      <VisitorConsent />
     </div>
   );
 }

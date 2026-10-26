@@ -22,7 +22,7 @@ function SidebarContent({ nav, title, subtitle }) {
   return (
     <div className="flex flex-col h-full">
       <Link to={home} className="flex items-center gap-2 px-5 h-16 border-b border-border shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-primary text-primary-foreground grid place-items-center font-display font-extrabold">A</div>
+        <img src="/africashop.png" alt="" className="w-8 h-8 rounded-lg object-contain" />
         <div className="leading-tight">
           <div className="font-display font-bold text-sm truncate max-w-[150px]">{title}</div>
           {subtitle && <div className="text-[11px] text-muted-foreground">{subtitle}</div>}
@@ -52,14 +52,22 @@ function SidebarContent({ nav, title, subtitle }) {
   );
 }
 
-export function DashboardShell({ nav, title, subtitle }) {
-  const { user, logout } = useAuth();
+export function DashboardShell({ nav, title, subtitle, headerAction }) {
+  const { user, logout, switchProfile } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
   const partner = isPartnerRole(user?.role);
   const [notifs, setNotifs] = useState([]);
   const [unread, setUnread] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const switchTo = async (profile) => {
+    try {
+      await switchProfile(profile);
+      navigate(profile === "MERCHANT" ? "/merchant" : "/account");
+    } catch {
+      toast.error("Impossible de changer de profil. Veuillez réessayer.");
+    }
+  };
   const notificationDestinations = {
     ACCOUNT: partner ? "/partner/account" : "/account/security",
     ACCOUNT_DELETION: "/admin/account-deletions",
@@ -144,6 +152,7 @@ export function DashboardShell({ nav, title, subtitle }) {
           <div className="font-display font-bold text-lg truncate">{title}</div>
 
           <div className="ml-auto flex items-center gap-1.5">
+            {headerAction}
             <LanguageSwitcher compact />
             {!partner && (
               <Button variant="ghost" size="icon" onClick={() => navigate("/")} title={t("home")} className="hidden sm:inline-flex" data-testid="dash-home">
@@ -201,6 +210,16 @@ export function DashboardShell({ nav, title, subtitle }) {
                 {!partner && (
                   <DropdownMenuItem onClick={() => navigate("/")} data-testid="dash-marketplace">
                     <Store className="w-4 h-4 mr-2" /> Marketplace
+                  </DropdownMenuItem>
+                )}
+                {user?.role === "CLIENT" && (user.profiles || []).includes("MERCHANT") && (
+                  <DropdownMenuItem onClick={() => switchTo("MERCHANT")} data-testid="dash-switch-merchant">
+                    <Store className="w-4 h-4 mr-2" /> Espace commerçant
+                  </DropdownMenuItem>
+                )}
+                {user?.role === "MERCHANT" && (user.profiles || []).includes("CLIENT") && (
+                  <DropdownMenuItem onClick={() => switchTo("CLIENT")} data-testid="dash-switch-client">
+                    <User className="w-4 h-4 mr-2" /> Espace client
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem onClick={() => { logout(); navigate(partner ? "/login" : "/"); }} data-testid="dash-logout">

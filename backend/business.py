@@ -1,4 +1,7 @@
 """Financial & business helper functions (server-side authoritative)."""
+from datetime import datetime, timezone
+from typing import Optional
+
 from db import db, now_iso, new_id
 
 
@@ -17,13 +20,38 @@ def price_for_type(product: dict, ctype: str) -> float:
 
 def promo_active(product: dict) -> bool:
     promo = product.get("promo") or {}
-    if not promo.get("enabled"):
+    if promo.get("enabled"):
+        qty = promo.get("promo_qty", 0)
+        sold = promo.get("promo_sold", 0)
+        if not qty or sold < qty:
+            return True
+    offer = product.get("daily_offer") or {}
+    if offer.get("status") != "ACTIVE" or float(offer.get("discount_percent") or 0) <= 0:
         return False
-    qty = promo.get("promo_qty", 0)
-    sold = promo.get("promo_sold", 0)
-    if qty and sold >= qty:
+    try:
+        now = datetime.now(timezone.utc)
+        return datetime.fromisoformat(offer["starts_at"]) <= now < datetime.fromisoformat(offer["ends_at"])
+    except (KeyError, TypeError, ValueError):
         return False
-    return True
+
+
+def daily_offer_price(product: dict, base_price: float) -> Optional[float]:
+    offer = product.get("daily_offer") or {}
+    if offer.get("status") != "ACTIVE":
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        if not datetime.fromisoformat(offer["starts_at"]) <= now < datetime.fromisoformat(offer["ends_at"]):
+            return None
+        fixed_price = offer.get("fixed_price")
+        if fixed_price is not None:
+            price = round(float(fixed_price), 2)
+            return price if price < base_price else None
+        if float(offer.get("discount_percent") or 0) > 0:
+            return round(base_price * (1 - float(offer["discount_percent"]) / 100), 2)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
 
 
 async def get_customer_type(shop_id: str, user_id: str) -> str:
@@ -39,9 +67,12 @@ def compute_line(product: dict, shop: dict, ctype: str, qty: int) -> dict:
     unit_type_price = price_for_type(product, ctype)
     coeffs = shop.get("coefficients") or {}
 
-    is_promo = promo_active(product)
+    daily_price = daily_offer_price(product, unit_type_price)
+    is_promo = daily_price is not None or promo_active(product)
     promo = product.get("promo") or {}
-    unit_charged = float(promo.get("promo_price", unit_type_price)) if is_promo else unit_type_price
+    unit_charged = daily_price if daily_price is not None else (
+        float(promo.get("promo_price", unit_type_price)) if is_promo else unit_type_price
+    )
 
     # Règle métier : un achat en promotion ne génère AUCUN bonus.
     bonus = 0.0

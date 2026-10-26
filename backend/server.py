@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from bson import ObjectId
+from pymongo import ReturnDocument
 
 from db import db, client, now_iso, new_id, gen_invite_code, gen_order_ref, gen_sku, gen_tracking, serialize, oid
 from security import (hash_password, verify_password, create_access_token, get_current_user,
@@ -63,6 +64,7 @@ class RegisterReq(BaseModel):
     carrier_id: Optional[str] = None
     proposed_relay: Optional[dict] = None
     language: Optional[str] = "fr"
+    merchant_terms_accepted: bool = False
 
 
 class LoginReq(BaseModel):
@@ -125,6 +127,9 @@ class SettingsReq(BaseModel):
     intl_shipping_per_kg: Optional[float] = None
     intl_shipping_per_km: Optional[float] = None
     intl_default_weight_kg: Optional[float] = None
+    homepage_images: Optional[List[str]] = None
+    homepage_ads: Optional[dict] = None
+    daily_offer_duration_hours: Optional[int] = None
 
 
 class CustomsRuleReq(BaseModel):
@@ -166,6 +171,19 @@ class TwoFAPrefReq(BaseModel):
     channel: str = "email"
 
 
+class MerchantProfileReq(BaseModel):
+    use_account_info: bool
+    accept_terms: bool
+
+
+class ProfileSwitchReq(BaseModel):
+    profile: str
+
+
+class ActiveShopReq(BaseModel):
+    shop_id: str
+
+
 class ApprovalDecisionReq(BaseModel):
     decision: str  # APPROVE | REJECT
     note: Optional[str] = ""
@@ -195,6 +213,16 @@ class ShopReq(BaseModel):
     description: Optional[str] = ""
     return_policy: Optional[str] = ""
     sale_conditions: Optional[str] = ""
+
+
+class ShopStorefrontImagesReq(BaseModel):
+    images: List[str] = []
+
+
+class DailyOfferDecisionReq(BaseModel):
+    offer_id: str
+    discount_percent: Optional[float] = None
+    fixed_price: Optional[float] = None
 
 
 class KycReq(BaseModel):
@@ -351,6 +379,7 @@ def _user_public(user: dict) -> dict:
         "email": user.get("email"),
         "phone": user.get("phone", ""),
         "role": user.get("role"),
+        "profiles": user.get("profiles") or [user.get("role")],
         "country": user.get("country", ""),
         "currency": user.get("currency") or (currency_for_country(user["country"])["code"] if user.get("country") else ""),
         "phone_verified": user.get("phone_verified", False),
@@ -479,6 +508,8 @@ async def register(req: RegisterReq, background_tasks: BackgroundTasks):
     role = req.role.upper()
     if role not in ("CLIENT", "MERCHANT", "RELAY_MANAGER", "CARRIER_AGENT"):
         role = "CLIENT"
+    if role == "MERCHANT" and not req.merchant_terms_accepted:
+        raise HTTPException(status_code=400, detail="L’acceptation des conditions commerçant est obligatoire.")
     if role in logistics.PARTNER_ROLES:
         return await _register_partner(req, email, role)
 
@@ -495,6 +526,7 @@ async def register(req: RegisterReq, background_tasks: BackgroundTasks):
         "password_hash": hash_password(req.password),
         "phone": req.phone or "",
         "role": role,
+        "profiles": [role],
         "country": req.country or "",
         "language": req.language if req.language in messaging.LANGS else "fr",
         "currency": req.currency or (currency_for_country(req.country)["code"] if req.country else ""),
@@ -508,6 +540,8 @@ async def register(req: RegisterReq, background_tasks: BackgroundTasks):
         "referred_by": referred_by,
         "is_partner": False,
         "created_at": now_iso(),
+        "merchant_terms_accepted_at": now_iso() if role == "MERCHANT" else None,
+        "merchant_terms_version": "2026-10-26" if role == "MERCHANT" else None,
     }
     res = await db.users.insert_one(doc)
     doc["_id"] = res.inserted_id
@@ -608,6 +642,37 @@ async def verify_2fa(req: TwoFAVerifyReq, request: Request):
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
     return {"user": _user_public(user)}
+
+
+@api.post("/auth/merchant-profile")
+async def create_merchant_profile(req: MerchantProfileReq, user: dict = Depends(get_current_user)):
+    if user.get("role") != "CLIENT":
+        raise HTTPException(status_code=403, detail="Seul un compte client peut ajouter un profil commerçant.")
+    if not req.use_account_info:
+        raise HTTPException(status_code=400, detail="La création du profil commerçant a été annulée.")
+    if not req.accept_terms:
+        raise HTTPException(status_code=400, detail="L’acceptation des conditions commerçant est obligatoire.")
+    profiles = user.get("profiles") or [user.get("role")]
+    if "MERCHANT" not in profiles:
+        await db.users.update_one(
+            {"_id": ObjectId(user["id"])},
+            {"$addToSet": {"profiles": {"$each": ["CLIENT", "MERCHANT"]}},
+             "$set": {"merchant_terms_accepted_at": now_iso(), "merchant_terms_version": "2026-10-26"}},
+        )
+    user["profiles"] = list(dict.fromkeys([*profiles, "MERCHANT"]))
+    user["role"] = "MERCHANT"
+    token = create_access_token(user["id"], user["email"], "MERCHANT", user.get("token_version", 0))
+    return {"token": token, "user": _user_public(user)}
+
+
+@api.post("/auth/switch-profile")
+async def switch_profile(req: ProfileSwitchReq, user: dict = Depends(get_current_user)):
+    profiles = user.get("profiles") or [user.get("role")]
+    if req.profile not in profiles:
+        raise HTTPException(status_code=403, detail="Ce profil n’est pas associé à votre compte.")
+    user["role"] = req.profile
+    token = create_access_token(user["id"], user["email"], req.profile, user.get("token_version", 0))
+    return {"token": token, "user": _user_public(user)}
 
 
 @api.post("/auth/send-phone-otp")
@@ -712,7 +777,7 @@ async def get_currencies():
 
 
 # ---------------- Legal content (Module 7) ----------------
-LEGAL_KINDS = ["terms", "privacy", "faq", "contact", "mentions"]
+LEGAL_KINDS = ["terms", "merchant_terms", "privacy", "faq", "contact", "mentions"]
 DEFAULT_TERMS_BODY = """Dernière mise à jour : 25 octobre 2026
 
 1. Objet et acceptation
@@ -751,6 +816,41 @@ Les présentes conditions sont soumises aux lois applicables dans le pays concer
 LEGAL_DEFAULTS = {
     "terms": {"title": "Conditions générales d’utilisation et de vente",
               "body": DEFAULT_TERMS_BODY},
+    "merchant_terms": {"title": "Conditions commerçant",
+                       "body": """Dernière mise à jour : 26 octobre 2026
+
+1. Objet et acceptation
+Ces conditions complètent les Conditions générales d’utilisation et de vente d’AfriMarket. Elles s’appliquent à toute personne qui active un profil commerçant ou exploite une boutique. En acceptant, vous confirmez avoir lu ces conditions et être habilité à engager l’activité que vous représentez.
+
+2. Identité et conformité
+Vous fournissez des informations exactes et à jour sur vous-même, votre activité, vos boutiques, les produits et les coordonnées de contact. Vous êtes responsable d’obtenir et de maintenir les immatriculations, autorisations, licences, documents fiscaux et autres justificatifs requis dans chaque pays où vous vendez. AfriMarket peut demander des vérifications d’identité ou d’activité avant l’ouverture ou la poursuite de votre activité.
+
+3. Annonces et produits
+Vous devez publier des descriptions, prix, stocks, images, garanties et caractéristiques fidèles. Vous garantissez que vous détenez les droits nécessaires sur les produits et contenus publiés. Les produits contrefaits, volés, dangereux, illicites, trompeurs ou soumis à restriction sans autorisation sont interdits. Vous respectez les règles de sécurité, d’étiquetage, de propriété intellectuelle, de protection des consommateurs et d’import-export applicables.
+
+4. Prix, commandes et service client
+Vous indiquez clairement les prix et informations nécessaires à la décision d’achat. Vous honorez les commandes acceptées, maintenez vos stocks à jour, préparez les colis correctement et répondez rapidement aux demandes concernant vos ventes. Vous ne devez pas annuler une commande sans motif légitime ni demander au client de régler hors de la plateforme lorsque le paiement y est proposé.
+
+5. Livraison, retours et remboursements
+Vous respectez les délais et modalités annoncés, coopérez avec le transporteur et fournissez les informations de suivi disponibles. Vous traitez les retards, pertes, dommages, défauts et produits non conformes de manière équitable. Les annulations, retours, remboursements, garanties et droits du consommateur suivent les conditions annoncées et les lois impératives applicables ; vous ne pouvez pas les écarter par une politique de boutique.
+
+6. Paiements, frais et fiscalité
+Les commissions, frais, modalités de versement et éventuelles réserves sont ceux présentés par AfriMarket avant ou pendant l’utilisation des services. Vous fournissez des coordonnées de paiement exactes et êtes responsable des impôts, taxes, droits de douane et obligations de facturation liés à votre activité. Les versements peuvent être différés pendant une vérification, une réclamation, un remboursement ou une obligation légale, conformément aux règles applicables.
+
+7. Plusieurs boutiques et compte
+Un même profil commerçant peut gérer plusieurs boutiques. Chaque boutique doit avoir un nom et des informations propres, exactes et non trompeuses. Vous êtes responsable de toutes les activités réalisées depuis votre compte et de l’accès donné à vos collaborateurs. Le profil commerçant partage les informations de compte et les identifiants de connexion de votre profil client associé.
+
+8. Données et communications
+Vous n’utilisez les données des clients que pour exécuter les commandes, répondre aux demandes et respecter vos obligations légales. Vous les protégez, ne les vendez pas et ne les réutilisez pas pour des communications non sollicitées. Vous respectez la Politique de confidentialité et les règles de protection des données applicables.
+
+9. Contrôles et mesures
+AfriMarket peut examiner, masquer ou retirer une annonce, demander des justificatifs, suspendre une boutique ou limiter un compte lorsqu’il existe un risque pour les utilisateurs, une suspicion de fraude, une violation des présentes conditions ou une obligation légale. Lorsque la loi et les circonstances le permettent, le commerçant est informé du motif et peut demander un réexamen. Les mesures de la plateforme ne remplacent pas les procédures prévues par la loi.
+
+10. Responsabilité et fin d’utilisation
+Vous demeurez responsable de vos produits, ventes, obligations professionnelles et échanges avec les clients. Les limitations de responsabilité d’AfriMarket prévues dans les Conditions générales s’appliquent dans la mesure permise par la loi et ne suppriment aucune responsabilité impérative. Vous pouvez cesser d’utiliser le profil commerçant ; les commandes, réclamations, remboursements, paiements et obligations déjà engagés doivent toutefois être traités.
+
+11. Droit applicable
+Ces conditions s’interprètent avec les Conditions générales et les règles impératives du pays concerné. En cas de différence, les protections légales obligatoires prévalent. Les parties peuvent rechercher une solution amiable avant de saisir les autorités ou tribunaux compétents."""},
     "privacy": {"title": "Politique de confidentialité",
                 "body": "Vos données sont utilisées uniquement pour le fonctionnement de la démonstration. Les documents d'identité (KYC) sont protégés et accessibles uniquement aux administrateurs autorisés."},
     "faq": {"title": "FAQ",
@@ -975,7 +1075,11 @@ async def _shop_or_404(shop_id: str):
 
 
 async def _my_shop(user: dict):
-    return await db.shops.find_one({"owner_id": user["id"]})
+    if user.get("active_shop_id"):
+        shop = await db.shops.find_one({"owner_id": user["id"], "id": user["active_shop_id"]})
+        if shop:
+            return shop
+    return await db.shops.find_one({"owner_id": user["id"]}, sort=[("created_at", -1)])
 
 
 def _img_bytes(s: str) -> int:
@@ -997,6 +1101,8 @@ def _product_img_bytes(image: str, gallery: list) -> int:
 
 async def _shop_storage_bytes(shop_id: str, exclude_product_id: str = None) -> int:
     total = 0
+    shop = await db.shops.find_one({"id": shop_id}, {"homepage_images": 1})
+    total += sum(_img_bytes(image) for image in (shop or {}).get("homepage_images", []))
     async for p in db.products.find({"shop_id": shop_id, "status": {"$ne": "DELETED"}},
                                     {"image": 1, "gallery": 1, "id": 1}):
         if exclude_product_id and p.get("id") == exclude_product_id:
@@ -1011,7 +1117,8 @@ def _mb(bytes_: int) -> float:
 
 @api.post("/shops")
 async def create_shop(req: ShopReq, user: dict = Depends(require_roles("MERCHANT"))):
-    existing = await db.shops.find_one({"owner_id": user["id"]})
+    if not req.name.strip() or not req.country.strip() or not req.city.strip():
+        raise HTTPException(status_code=400, detail="Le nom de la boutique, le pays et la ville sont obligatoires.")
     cur = currency_for_country(req.country)
     doc = {
         "id": new_id(),
@@ -1025,28 +1132,41 @@ async def create_shop(req: ShopReq, user: dict = Depends(require_roles("MERCHANT
         "coefficients": {"partner": 0.5, "professional": 0.5, "enterprise": 0.5},
         "payment_provider": "MONITY_WORLD",
         "payment_config": {},
+        "homepage_images": [],
         "created_at": now_iso(),
         "is_demo": False,
     }
-    if existing:
-        upd = {k: v for k, v in doc.items() if k not in ("id", "created_at", "status", "coefficients")}
-        await db.shops.update_one({"id": existing["id"]}, {"$set": upd})
-        shop = await db.shops.find_one({"id": existing["id"]})
-        return {"shop": serialize(shop)}
     await db.shops.insert_one(doc)
+    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"active_shop_id": doc["id"]}})
     await audit_log(user, "CREATE_SHOP", "shop", doc["id"], None, doc["name"])
     return {"shop": serialize(doc)}
 
 
 @api.get("/shops/mine")
-async def my_shop(user: dict = Depends(require_roles("MERCHANT"))):
-    shop = await _my_shop(user)
+async def my_shop(shop_id: Optional[str] = None, user: dict = Depends(require_roles("MERCHANT"))):
+    shops = await db.shops.find({"owner_id": user["id"]}).sort("created_at", -1).to_list(500)
+    selected = next((s for s in shops if s["id"] == shop_id), None) if shop_id else None
+    if not selected:
+        selected = next((s for s in shops if s["id"] == user.get("active_shop_id")), None)
+    if not selected and shops:
+        selected = shops[0]
+    result = [serialize(row) for row in shops]
+    selected_out = next((s for s in result if selected and s["id"] == selected["id"]), None)
+    if selected_out:
+        selected_out["storage_used_mb"] = _mb(await _shop_storage_bytes(selected_out["id"]))
+        selected_out["product_count"] = await db.products.count_documents(
+            {"shop_id": selected_out["id"], "status": {"$ne": "DELETED"}}
+        )
+    return {"shop": selected_out, "shops": result}
+
+
+@api.put("/shops/mine/active")
+async def set_active_shop(req: ActiveShopReq, user: dict = Depends(require_roles("MERCHANT"))):
+    shop = await db.shops.find_one({"id": req.shop_id, "owner_id": user["id"]})
     if not shop:
-        return {"shop": None}
-    out = serialize(shop)
-    out["storage_used_mb"] = _mb(await _shop_storage_bytes(shop["id"]))
-    out["product_count"] = await db.products.count_documents({"shop_id": shop["id"], "status": {"$ne": "DELETED"}})
-    return {"shop": out}
+        raise HTTPException(status_code=404, detail="Boutique introuvable")
+    await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"active_shop_id": shop["id"]}})
+    return {"shop": serialize(shop)}
 
 
 @api.post("/shops/{shop_id}/submit")
@@ -1069,6 +1189,30 @@ async def update_shop(shop_id: str, req: ShopReq, user: dict = Depends(require_r
         raise HTTPException(status_code=403, detail="Accès refusé")
     await db.shops.update_one({"id": shop_id}, {"$set": req.model_dump()})
     return {"message": "Boutique mise à jour"}
+
+
+@api.put("/shops/{shop_id}/storefront-images")
+async def update_shop_storefront_images(shop_id: str, req: ShopStorefrontImagesReq,
+                                       user: dict = Depends(require_roles("MERCHANT"))):
+    shop = await _shop_or_404(shop_id)
+    if shop["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    images = [image.strip() for image in req.images if isinstance(image, str) and image.strip()]
+    if len(images) > 10 or any(
+        len(image) > 2048 or not image.startswith(("https://", "http://")) for image in images
+    ):
+        raise HTTPException(status_code=400, detail="Maximum 10 images web valides")
+    settings = await get_settings()
+    quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
+    if quota_mb > 0:
+        old_size = sum(_img_bytes(image) for image in shop.get("homepage_images", []))
+        used = await _shop_storage_bytes(shop_id)
+        new_size = sum(_img_bytes(image) for image in images)
+        if used - old_size + new_size > quota_mb * 1024 * 1024:
+            raise HTTPException(status_code=403, detail=f"Quota de stockage atteint ({quota_mb} Mo).")
+    await db.shops.update_one({"id": shop_id}, {"$set": {"homepage_images": images}})
+    await audit_log(user, "UPDATE_SHOP_IMAGES", "shop", shop_id, len(shop.get("homepage_images", [])), len(images))
+    return {"images": images}
 
 
 @api.put("/shops/{shop_id}/coefficients")
@@ -1236,6 +1380,7 @@ async def update_product(product_id: str, req: ProductReq, user: dict = Depends(
         upd["stock"] = sum(v["stock"] for v in upd["variants"])
     upd["moderation_status"] = "PENDING"
     upd["moderation_reason"] = ""
+    upd["daily_offer.status"] = "EXPIRED"
     await db.products.update_one({"id": product_id}, {"$set": upd})
     await audit_log(user, "UPDATE_PRODUCT", "product", product_id, old_prices, {"price_simple": req.price_simple})
     await _notify_moderators("PRODUCT_MODERATION", "Produit modifié à revalider",
@@ -1293,16 +1438,59 @@ async def viewer_ctype(shop_id: str, user: Optional[dict], cache: dict) -> str:
     return ct
 
 
+def _daily_offer_live(offer: dict, now: Optional[datetime] = None) -> bool:
+    if offer.get("status") != "ACTIVE":
+        return False
+    now = now or datetime.now(timezone.utc)
+    try:
+        starts_at = datetime.fromisoformat(offer["starts_at"])
+        ends_at = datetime.fromisoformat(offer["ends_at"])
+        return starts_at <= now < ends_at
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _daily_offer_price(offer: dict, base_price: float) -> Optional[float]:
+    try:
+        if offer.get("fixed_price") is not None:
+            price = round(float(offer["fixed_price"]), 2)
+            return price if price < base_price else None
+        discount = float(offer.get("discount_percent") or 0)
+        if discount > 0:
+            return round(base_price * (1 - discount / 100), 2)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def _public_product(product: dict, ctype: str) -> dict:
     """Public payload: expose only the simple price and the viewer's own price."""
     p = serialize(product)
     for k in ("price_partner", "price_pro", "price_enterprise"):
         p.pop(k, None)
+    offer = product.get("daily_offer") or {}
+    p.pop("daily_offer", None)
+    p.pop("daily_offer_last_proposed_at", None)
     p["display_price"] = price_for_type(product, ctype)
     p["viewer_type"] = ctype
     p["is_promo"] = promo_active(product)
     if p["is_promo"]:
         p["promo_price"] = (product.get("promo") or {}).get("promo_price")
+    if _daily_offer_live(offer):
+        base_price = price_for_type(product, ctype)
+        offer_price = _daily_offer_price(offer, base_price)
+        discount = round((base_price - offer_price) * 100 / base_price, 2) if offer_price is not None and base_price > 0 else 0
+        p["daily_offer_active"] = True
+        p["daily_offer"] = {
+            "discount_percent": max(0, discount),
+            "ends_at": offer["ends_at"],
+            "price": offer_price,
+        }
+        if offer_price is not None and offer_price < base_price:
+            p["is_promo"] = True
+            p["promo_price"] = offer_price
+    else:
+        p["daily_offer_active"] = False
     return p
 
 
@@ -1367,6 +1555,263 @@ async def list_products(request: Request, q: Optional[str] = None, category: Opt
             continue
         result.append(item)
     return {"products": result}
+
+
+@api.get("/daily-offers")
+async def list_daily_offers(request: Request, country: Optional[str] = None):
+    if not country:
+        return {"products": []}
+    now = now_iso()
+    products = await db.products.find({
+        "status": "ACTIVE",
+        "moderation_status": "APPROVED",
+        "daily_offer.status": "ACTIVE",
+        "daily_offer.country": country,
+        "daily_offer.ends_at": {"$gt": now},
+    }).sort("daily_offer.starts_at", -1).to_list(100)
+    user = await _optional_user(request)
+    ctype_cache = {}
+    shops = {}
+    result = []
+    disabled = await payapis.disabled_countries()
+    for product in products:
+        if product.get("stock", 0) <= 0 or not _daily_offer_live(product.get("daily_offer") or {}):
+            continue
+        shop_id = product.get("shop_id")
+        if shop_id not in shops:
+            shops[shop_id] = await db.shops.find_one({"id": shop_id})
+        shop = shops[shop_id]
+        if not shop or shop.get("status") != "APPROVED" or shop.get("suspended") or shop.get("country") in disabled:
+            continue
+        viewer_type = await viewer_ctype(shop_id, user, ctype_cache)
+        result.append(_public_product(product, viewer_type))
+    return {"products": result}
+
+
+@api.get("/daily-offers/mine")
+async def my_daily_offers(user: dict = Depends(require_roles("MERCHANT"))):
+    shop = await _my_shop(user)
+    if not shop:
+        return {"products": []}
+    rows = await db.products.find({
+        "shop_id": shop["id"],
+        "daily_offer.status": {"$in": ["PENDING", "ACTIVE"]},
+    }).sort("daily_offer.submitted_at", -1).to_list(100)
+    return {"products": [serialize(product) for product in rows]}
+
+
+async def _activate_daily_offer(product: dict, discount_percent: float, fixed_price: Optional[float],
+                                automatic: bool = False) -> bool:
+    offer = product.get("daily_offer") or {}
+    if offer.get("status") != "PENDING":
+        return False
+    now = datetime.now(timezone.utc)
+    settings = await get_settings()
+    duration = int(settings.get("daily_offer_duration_hours") or 24)
+    active_offer = {
+        **offer,
+        "status": "ACTIVE",
+        "discount_percent": round(discount_percent, 2),
+        "fixed_price": fixed_price,
+        "automatic": automatic,
+        "starts_at": now.isoformat(),
+        "ends_at": (now + timedelta(hours=duration)).isoformat(),
+    }
+    result = await db.products.update_one(
+        {"id": product["id"], "daily_offer.id": offer.get("id"), "daily_offer.status": "PENDING"},
+        {"$set": {"daily_offer": active_offer}},
+    )
+    return result.modified_count > 0
+
+
+@api.post("/daily-offers/{product_id}/approve")
+async def approve_daily_offer(product_id: str, req: DailyOfferDecisionReq,
+                              user: dict = Depends(require_roles("MERCHANT"))):
+    product = await db.products.find_one({"id": product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Produit introuvable")
+    shop = await _shop_or_404(product["shop_id"])
+    if shop["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    offer = product.get("daily_offer") or {}
+    if offer.get("id") != req.offer_id or offer.get("status") != "PENDING":
+        raise HTTPException(status_code=409, detail="Cette proposition n'est plus en attente")
+    try:
+        deadline = datetime.fromisoformat(offer["review_deadline"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=409, detail="Délai de réponse de l'offre invalide")
+    if deadline <= datetime.now(timezone.utc):
+        await _activate_daily_offer(product, 0, None, automatic=True)
+        raise HTTPException(status_code=409, detail="Le délai de 24 h est dépassé; l'offre est affichée au prix normal.")
+    if req.discount_percent is not None and req.fixed_price is not None:
+        raise HTTPException(status_code=400, detail="Choisissez un pourcentage ou un nouveau prix, pas les deux.")
+    percent = float(req.discount_percent or 0)
+    if not math.isfinite(percent) or not 0 <= percent < 100:
+        raise HTTPException(status_code=400, detail="La réduction doit être comprise entre 0 et 99,99 %.")
+    base_prices = [
+        float(product.get(key) or 0)
+        for key in ("price_simple", "price_partner", "price_pro", "price_enterprise")
+    ]
+    minimum_price = min((price for price in base_prices if price > 0), default=0)
+    if percent > 0 and round(minimum_price * (1 - percent / 100), 2) <= 0:
+        raise HTTPException(status_code=400, detail="La réduction doit conserver un prix positif.")
+    fixed_price = None
+    if req.fixed_price is not None:
+        fixed_price = round(float(req.fixed_price), 2)
+        if not math.isfinite(fixed_price) or fixed_price <= 0 or fixed_price > minimum_price:
+            raise HTTPException(status_code=400, detail="Le nouveau prix doit être positif et ne pas dépasser le prix normal.")
+        percent = round((minimum_price - fixed_price) * 100 / minimum_price, 2) if minimum_price else 0
+    activated = await _activate_daily_offer(product, percent, fixed_price)
+    if not activated:
+        raise HTTPException(status_code=409, detail="Cette proposition a déjà été traitée.")
+    await audit_log(user, "APPROVE_DAILY_OFFER", "product", product_id, None,
+                    {"discount_percent": percent, "fixed_price": fixed_price})
+    return {"message": "Offre activée", "discount_percent": percent, "fixed_price": fixed_price}
+
+
+async def run_daily_offers() -> dict:
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    settings = await get_settings()
+    duration = int(settings.get("daily_offer_duration_hours") or 24)
+    stats = {"activated_at_normal_price": 0, "expired": 0, "proposed": 0, "countries": 0}
+
+    pending = await db.products.find({
+        "daily_offer.status": "PENDING",
+        "daily_offer.review_deadline": {"$lte": now_text},
+    }).to_list(5000)
+    for product in pending:
+        if await _activate_daily_offer(product, 0, None, automatic=True):
+            stats["activated_at_normal_price"] += 1
+            shop = await db.shops.find_one({"id": product.get("shop_id")})
+            if shop:
+                await notify(shop["owner_id"], "DAILY_OFFER_AUTO_FEATURED", "Offre mise en avant",
+                             f"Votre produit « {product.get('name', '')} » est mis en avant au prix normal après 24 h sans réponse.",
+                             "/merchant/daily-offers")
+
+    expired_result = await db.products.update_many(
+        {"daily_offer.status": "ACTIVE", "daily_offer.ends_at": {"$lte": now_text}},
+        {"$set": {"daily_offer.status": "EXPIRED"}},
+    )
+    stats["expired"] = expired_result.modified_count
+
+    today = now.date().isoformat()
+    generation_id = f"daily-offers-generated:{today}"
+    await db.cron_runs.update_one(
+        {"_id": generation_id},
+        {"$setOnInsert": {"at": now_text, "name": "daily-offers-generated"}},
+        upsert=True,
+    )
+    lock_id = new_id()
+    generation = await db.cron_runs.find_one_and_update(
+        {
+            "_id": generation_id,
+            "completed_at": {"$exists": False},
+            "$or": [{"lease_until": {"$exists": False}}, {"lease_until": {"$lte": now_text}}],
+        },
+        {"$set": {"lease_until": (now + timedelta(minutes=30)).isoformat(), "lock_id": lock_id}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not generation:
+        return stats
+
+    disabled_countries = set(await payapis.disabled_countries())
+    shops = await db.shops.find({"status": "APPROVED", "suspended": {"$ne": True}}).to_list(5000)
+    shops_by_country = {}
+    for shop in shops:
+        country = shop.get("country")
+        if country and country not in disabled_countries:
+            shops_by_country.setdefault(country, []).append(shop)
+    stats["countries"] = len(shops_by_country)
+
+    for country, country_shops in shops_by_country.items():
+        shop_by_id = {shop["id"]: shop for shop in country_shops}
+        products = await db.products.find({
+            "shop_id": {"$in": list(shop_by_id)},
+            "status": "ACTIVE",
+            "moderation_status": "APPROVED",
+            "stock": {"$gt": 0},
+        }).to_list(10000)
+        existing_today = sum(
+            1 for product in products
+            for offer in [product.get("daily_offer") or {}]
+            if offer.get("country") == country
+            and (
+                (offer.get("submitted_at") or "").startswith(today)
+                or (offer.get("starts_at") or "").startswith(today)
+            )
+        )
+        eligible = []
+        for product in products:
+            offer = product.get("daily_offer") or {}
+            if offer.get("status") == "PENDING" and offer.get("review_deadline", "") > now_text:
+                continue
+            if offer.get("status") == "ACTIVE" and offer.get("ends_at", "") > now_text:
+                continue
+            if (product.get("promo") or {}).get("enabled"):
+                continue
+            eligible.append(product)
+        eligible.sort(key=lambda product: (
+            int(product.get("sold") or 0),
+            product.get("daily_offer_last_proposed_at") is not None,
+            product.get("daily_offer_last_proposed_at") or "",
+            product.get("created_at") or "",
+        ))
+        first_per_shop = []
+        deferred = []
+        seen_shops = set()
+        for product in eligible:
+            if product["shop_id"] in seen_shops:
+                deferred.append(product)
+            else:
+                seen_shops.add(product["shop_id"])
+                first_per_shop.append(product)
+        selected = (first_per_shop + deferred)[:max(0, 4 - existing_today)]
+        for product in selected:
+            shop = shop_by_id[product["shop_id"]]
+            offer = {
+                "id": new_id(),
+                "status": "PENDING",
+                "country": country,
+                "shop_id": shop["id"],
+                "submitted_at": now_text,
+                "review_deadline": (now + timedelta(hours=24)).isoformat(),
+                "discount_percent": 0,
+                "fixed_price": None,
+            }
+            result = await db.products.update_one(
+                {"id": product["id"], "daily_offer_last_proposed_at": product.get("daily_offer_last_proposed_at")},
+                {"$set": {"daily_offer": offer, "daily_offer_last_proposed_at": now_text}},
+            )
+            if result.modified_count:
+                await notify(shop["owner_id"], "DAILY_OFFER_PROPOSAL", "Proposition d'offre du jour",
+                             f"Votre produit « {product.get('name', '')} » peut être mis en avant. Choisissez une réduction, un nouveau prix ou 0 %.",
+                             "/merchant/daily-offers")
+                stats["proposed"] += 1
+    await db.cron_runs.update_one(
+        {"_id": generation_id, "lock_id": lock_id},
+        {"$set": {"completed_at": now_iso(), "stats": stats},
+         "$unset": {"lease_until": ""}},
+    )
+    return stats
+
+
+async def _safe_run_daily_offers():
+    try:
+        await run_daily_offers()
+    except Exception:
+        logger.exception("Daily offer cycle failed")
+
+
+@api.post("/cron/daily-offers")
+async def cron_daily_offers(request: Request, background_tasks: BackgroundTasks):
+    secret = os.environ.get("WEBHOOK_CRON_SECRET", "")
+    auth = request.headers.get("authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else ""
+    if not secret or not token or not secrets.compare_digest(token, secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    background_tasks.add_task(_safe_run_daily_offers)
+    return {"status": "accepted"}
 
 
 @api.get("/products/{product_id}")
@@ -2492,8 +2937,8 @@ async def shop_stats(shop_id: str, user: dict = Depends(require_roles("MERCHANT"
 @api.get("/admin/overview")
 async def admin_overview(user: dict = Depends(require_module("overview"))):
     total_users = await db.users.count_documents({})
-    clients = await db.users.count_documents({"role": "CLIENT"})
-    merchants = await db.users.count_documents({"role": "MERCHANT"})
+    clients = await db.users.count_documents({"$or": [{"role": "CLIENT"}, {"profiles": "CLIENT"}]})
+    merchants = await db.users.count_documents({"$or": [{"role": "MERCHANT"}, {"profiles": "MERCHANT"}]})
     shops_total = await db.shops.count_documents({})
     shops_pending = await db.shops.count_documents({"status": {"$in": ["SUBMITTED", "UNDER_REVIEW"]}})
     shops_approved = await db.shops.count_documents({"status": "APPROVED"})
@@ -3064,9 +3509,21 @@ async def _execute_approval(appr: dict, approver: dict):
                          "/account/withdrawals")
     elif kind == "DELETE_MERCHANT":
         uid = appr["target_id"]
-        await db.users.update_one({"_id": ObjectId(uid)}, {"$set": {"status": "DISABLED"}, "$inc": {"token_version": 1}})
+        target = await db.users.find_one({"_id": ObjectId(uid)})
+        profiles = target.get("profiles") or [target.get("role")] if target else []
+        if "CLIENT" in profiles:
+            await db.users.update_one(
+                {"_id": ObjectId(uid)}, {"$pull": {"profiles": "MERCHANT"}, "$inc": {"token_version": 1}}
+            )
+            await notify(uid, "ACCOUNT", "Profil commerçant désactivé",
+                         "Votre profil commerçant et ses boutiques ont été suspendus. Votre compte client reste actif.",
+                         "/account")
+        else:
+            await db.users.update_one(
+                {"_id": ObjectId(uid)}, {"$set": {"status": "DISABLED"}, "$inc": {"token_version": 1}}
+            )
+            await send_message(uid, "auth_account_suspended", {}, ntype="ACCOUNT")
         await db.shops.update_many({"owner_id": uid}, {"$set": {"suspended": True}})
-        await send_message(uid, "auth_account_suspended", {}, ntype="ACCOUNT")
 
 
 @api.get("/admin/rbac/meta")
@@ -3168,6 +3625,21 @@ async def delete_staff(sid: str, request: Request, user: dict = Depends(require_
     return {"message": "Gestionnaire désactivé"}
 
 
+@api.get("/storefront/config")
+async def public_storefront_config():
+    settings = await get_settings()
+    return {
+        "homepage_images": settings.get("homepage_images") or [],
+        "homepage_ads": settings.get("homepage_ads") or {
+            "above_hero": False,
+            "below_hero": True,
+            "show_promotions": True,
+            "show_popular": False,
+        },
+        "daily_offer_duration_hours": settings.get("daily_offer_duration_hours") or 24,
+    }
+
+
 @api.get("/admin/settings")
 async def admin_get_settings(user: dict = Depends(require_module("settings"))):
     s = await get_settings()
@@ -3233,6 +3705,29 @@ async def admin_put_settings(req: SettingsReq, request: Request, user: dict = De
             if isinstance(v, dict):
                 clean[k] = {"title": str(v.get("title", ""))[:200], "body": str(v.get("body", ""))[:20000]}
         upd["legal_content"] = clean
+    if req.homepage_images is not None:
+        images = [image.strip() for image in req.homepage_images if isinstance(image, str) and image.strip()]
+        if len(images) > 10 or any(
+            len(image) > 2048 or not image.startswith(("https://", "http://")) for image in images
+        ):
+            raise HTTPException(status_code=400, detail="Maximum 10 images web valides")
+        upd["homepage_images"] = images
+    if req.homepage_ads is not None:
+        allowed = ("above_hero", "below_hero", "show_promotions", "show_popular")
+        if any(key not in allowed for key in req.homepage_ads):
+            raise HTTPException(status_code=400, detail="Configuration de bannière invalide")
+        if any(not isinstance(value, bool) for value in req.homepage_ads.values()):
+            raise HTTPException(status_code=400, detail="Les options de bannière doivent être booléennes.")
+        current = await get_settings()
+        existing_ads = current.get("homepage_ads") or {}
+        upd["homepage_ads"] = {
+            key: bool(req.homepage_ads.get(key, existing_ads.get(key, key == "below_hero" or key == "show_promotions")))
+            for key in allowed
+        }
+    if req.daily_offer_duration_hours is not None:
+        if not 24 <= req.daily_offer_duration_hours <= 336:
+            raise HTTPException(status_code=400, detail="La durée des offres doit être comprise entre 24 h et 2 semaines.")
+        upd["daily_offer_duration_hours"] = req.daily_offer_duration_hours
     await db.platform_settings.update_one({"_id": "global"}, {"$set": upd}, upsert=True)
     await audit_log(user, "UPDATE_SETTINGS", "settings", "global", None, upd, _client_ip(request))
     s = await get_settings(); s.pop("_id", None)
@@ -3276,7 +3771,8 @@ async def admin_decide_approval(aid: str, req: ApprovalDecisionReq, request: Req
 @api.delete("/admin/merchants/{user_id}")
 async def request_delete_merchant(user_id: str, request: Request, user: dict = Depends(require_admin_level())):
     target = await db.users.find_one({"_id": oid(user_id)})
-    if not target or target.get("role") != "MERCHANT":
+    profiles = (target.get("profiles") or [target.get("role")]) if target else []
+    if not target or "MERCHANT" not in profiles:
         raise HTTPException(status_code=404, detail="Vendeur introuvable")
     existing = await db.approval_requests.find_one({"kind": "DELETE_MERCHANT", "target_id": user_id, "status": "PENDING"})
     if existing:

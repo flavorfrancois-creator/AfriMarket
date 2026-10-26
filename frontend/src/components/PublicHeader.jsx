@@ -4,6 +4,7 @@ import { useI18n } from "@/lib/i18n";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { usePrivateClient } from "@/context/PrivateClientContext";
+import { toast } from "sonner";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { CurrencySwitcher } from "@/components/CurrencySwitcher";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,7 @@ import { ShoppingCart, Search, User, Menu, Store, LayoutDashboard, LogOut } from
 
 export function PublicHeader() {
   const { t } = useI18n();
-  const { user, logout } = useAuth();
+  const { user, logout, switchProfile } = useAuth();
   const { count } = useCart();
   const { active, client, clear } = usePrivateClient();
   const navigate = useNavigate();
@@ -26,6 +27,15 @@ export function PublicHeader() {
   const submitSearch = (e) => {
     e.preventDefault();
     navigate(`/products?q=${encodeURIComponent(q)}`);
+  };
+
+  const switchTo = async (profile) => {
+    try {
+      await switchProfile(profile);
+      navigate(profile === "MERCHANT" ? "/merchant" : "/account");
+    } catch {
+      toast.error("Impossible de changer de profil. Veuillez réessayer.");
+    }
   };
 
   const dashPath = () => {
@@ -70,7 +80,7 @@ export function PublicHeader() {
         </Sheet>
 
         <Link to="/" className="flex items-center gap-2 shrink-0" data-testid="logo-link">
-          <div className="w-9 h-9 rounded-xl bg-primary text-primary-foreground grid place-items-center font-display font-extrabold">A</div>
+          <img src="/africashop.png" alt="" className="w-9 h-9 rounded-xl object-contain" />
           <span className="font-display font-extrabold text-lg hidden sm:block">{t("app_name")}</span>
         </Link>
 
@@ -126,7 +136,17 @@ export function PublicHeader() {
                 <DropdownMenuItem onClick={() => navigate(dashPath())} data-testid="menu-dashboard">
                   <LayoutDashboard className="w-4 h-4 mr-2" /> {t("dashboard")}
                 </DropdownMenuItem>
-                {user.role === "CLIENT" && (
+                {user.role === "CLIENT" && (user.profiles || []).includes("MERCHANT") && (
+                  <DropdownMenuItem onClick={() => switchTo("MERCHANT")} data-testid="switch-to-merchant">
+                    <Store className="w-4 h-4 mr-2" /> Espace commerçant
+                  </DropdownMenuItem>
+                )}
+                {user.role === "MERCHANT" && (user.profiles || []).includes("CLIENT") && (
+                  <DropdownMenuItem onClick={() => switchTo("CLIENT")} data-testid="switch-to-client">
+                    <User className="w-4 h-4 mr-2" /> Espace client
+                  </DropdownMenuItem>
+                )}
+                {user.role === "CLIENT" && !(user.profiles || []).includes("MERCHANT") && (
                   <DropdownMenuItem onClick={() => navigate("/register?role=merchant")}>
                     <Store className="w-4 h-4 mr-2" /> {t("become_merchant")}
                   </DropdownMenuItem>

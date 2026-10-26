@@ -151,7 +151,7 @@ export function Login() {
 
 export function Register() {
   const { t, lang } = useI18n();
-  const { login } = useAuth();
+  const { login, user, switchProfile } = useAuth();
   const navigate = useNavigate();
   const [sp] = useSearchParams();
   const [form, setForm] = useState({
@@ -163,9 +163,12 @@ export function Register() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [acceptedMerchantTerms, setAcceptedMerchantTerms] = useState(false);
+  const [activatingMerchant, setActivatingMerchant] = useState(false);
   const [pendingMsg, setPendingMsg] = useState("");
   const [partner, setPartner] = useState({ relay_point_id: "", carrier_id: "", name: "", city: "", address: "" });
   const isPartner = form.role === "RELAY_MANAGER" || form.role === "CARRIER_AGENT";
+  const isMerchantProfileFlow = !!user && form.role === "MERCHANT";
 
   useEffect(() => {
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
@@ -180,12 +183,16 @@ export function Register() {
     setError("");
     if (!form.country) { setError("Veuillez sélectionner votre pays."); return; }
     if (!acceptedTerms) { setError("Veuillez accepter les conditions d’utilisation."); return; }
+    if (form.role === "MERCHANT" && !acceptedMerchantTerms) {
+      setError("Veuillez accepter les conditions commerçant."); return;
+    }
     if (form.password !== form.confirm) { setError("Les mots de passe ne correspondent pas"); return; }
     setLoading(true);
     try {
       const { data } = await api.post("/auth/register", {
         name: form.name, email: form.email, phone: form.phone ? `${selectedCountry.phone_code}${form.phone}` : "", password: form.password,
-        role: form.role, country: form.country, invite_code: form.invite_code || null, language: lang,
+        role: form.role, country: form.country, invite_code: form.role === "MERCHANT" ? null : form.invite_code || null,
+        merchant_terms_accepted: form.role === "MERCHANT" && acceptedMerchantTerms, language: lang,
         ...(form.role === "RELAY_MANAGER" ? (partner.relay_point_id ? { relay_point_id: partner.relay_point_id }
           : { proposed_relay: { name: partner.name, city: partner.city, address: partner.address } }) : {}),
         ...(form.role === "CARRIER_AGENT" ? { carrier_id: partner.carrier_id } : {}),
@@ -202,11 +209,78 @@ export function Register() {
     }
   };
 
+  const addMerchantProfile = async () => {
+    setError("");
+    if (!acceptedMerchantTerms) {
+      setError("Veuillez accepter les conditions commerçant.");
+      return;
+    }
+    setActivatingMerchant(true);
+    try {
+      const { data } = await api.post("/auth/merchant-profile", { use_account_info: true, accept_terms: true });
+      login(data.token, data.user);
+      toast.success("Profil commerçant activé.");
+      navigate("/merchant/onboarding?new=1");
+    } catch (err) {
+      setError(apiErr(err));
+    } finally {
+      setActivatingMerchant(false);
+    }
+  };
+
   if (pendingMsg) {
     return (
       <AuthShell title="Inscription envoyée" sub="Compte partenaire logistique">
         <div className="text-sm bg-green-50 border border-green-200 rounded-lg p-4" data-testid="reg-pending">{pendingMsg}</div>
         <Link to="/login" className="block text-center text-primary text-sm mt-4">Retour à la connexion</Link>
+      </AuthShell>
+    );
+  }
+
+  if (isMerchantProfileFlow) {
+    const hasMerchantProfile = user.role === "MERCHANT" || (user.profiles || []).includes("MERCHANT");
+    return (
+      <AuthShell title="Créer votre profil commerçant" sub="Votre profil client et commerçant partageront le même compte">
+        {hasMerchantProfile ? (
+          <div className="space-y-4">
+            <p className="text-sm">Un profil commerçant existe déjà pour ce compte.</p>
+            <Button className="w-full rounded-full h-11" onClick={async () => {
+              try {
+                await switchProfile("MERCHANT");
+                navigate("/merchant");
+              } catch {
+                setError("Impossible de changer de profil. Veuillez réessayer.");
+              }
+            }}>Accéder à mon espace commerçant</Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm">Souhaitez-vous utiliser les informations de votre compte client pour créer le profil commerçant ?</p>
+            <dl className="rounded-lg border border-border bg-muted/40 p-3 text-sm space-y-2">
+              <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Nom</dt><dd className="text-right">{user.name}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Pays</dt><dd className="text-right">{user.country || "Non renseigné"}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Téléphone</dt><dd className="text-right">{user.phone || "Non renseigné"}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-muted-foreground">E-mail</dt><dd className="text-right">{user.email}</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Mot de passe</dt><dd className="text-right">Identifiants actuels conservés</dd></div>
+            </dl>
+            <label className="flex items-start gap-2 text-sm leading-relaxed">
+              <input type="checkbox" checked={acceptedMerchantTerms} onChange={(e) => setAcceptedMerchantTerms(e.target.checked)}
+                required data-testid="merchant-terms-accept" className="mt-1 accent-primary" />
+              <span>
+                J’accepte les <Link to="/terms/merchant" target="_blank" rel="noreferrer" className="text-primary underline">conditions d’utilisation relatives aux commerçants</Link>.
+              </span>
+            </label>
+            {error && <div className="text-sm text-destructive" data-testid="reg-error">{error}</div>}
+            <Button className="w-full rounded-full h-11" disabled={activatingMerchant || !acceptedMerchantTerms}
+              onClick={addMerchantProfile} data-testid="merchant-profile-confirm">
+              {activatingMerchant && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Oui, utiliser ces informations
+            </Button>
+            <Button variant="outline" className="w-full rounded-full h-11" disabled={activatingMerchant}
+              onClick={() => navigate("/account")} data-testid="merchant-profile-cancel">
+              Annuler la création
+            </Button>
+          </div>
+        )}
       </AuthShell>
     );
   }
@@ -266,10 +340,19 @@ export function Register() {
             <Input type="password" value={form.confirm} onChange={(e) => upd("confirm", e.target.value)} required data-testid="reg-confirm" className="mt-1" />
           </div>
         </div>
-        {!isPartner && <div>
+        {!isPartner && form.role !== "MERCHANT" && <div>
           <Label>Code d'invitation (optionnel)</Label>
           <Input value={form.invite_code} onChange={(e) => upd("invite_code", e.target.value)} placeholder="INVITE-XXXXXX" data-testid="reg-invite" className="mt-1" />
         </div>}
+        {form.role === "MERCHANT" && (
+          <label className="flex items-start gap-2 text-sm leading-relaxed" data-testid="reg-merchant-terms-label">
+            <input type="checkbox" checked={acceptedMerchantTerms} onChange={(e) => setAcceptedMerchantTerms(e.target.checked)}
+              required data-testid="reg-merchant-terms" className="mt-1 accent-primary" />
+            <span>
+              J’accepte les <Link to="/terms/merchant" target="_blank" rel="noreferrer" className="text-primary underline">conditions d’utilisation relatives aux commerçants</Link>.
+            </span>
+          </label>
+        )}
         {error && <div className="text-sm text-destructive" data-testid="reg-error">{error}</div>}
         <label className="flex items-start gap-2 text-sm leading-relaxed" data-testid="reg-terms-label">
           <input type="checkbox" checked={acceptedTerms} onChange={(e) => setAcceptedTerms(e.target.checked)}

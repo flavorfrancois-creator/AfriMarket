@@ -33,14 +33,40 @@ const useMerchant = () => useContext(MerchantCtx);
 
 export function MerchantLayout() {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const [shop, setShop] = useState(undefined);
+  const [shops, setShops] = useState([]);
   const reload = useCallback(() => {
-    api.get("/shops/mine").then((r) => setShop(r.data.shop)).catch(() => setShop(null));
+    api.get("/shops/mine").then((r) => { setShop(r.data.shop); setShops(r.data.shops || []); }).catch(() => setShop(null));
   }, []);
   useEffect(() => { reload(); }, [reload]);
 
   if (shop === undefined) return <Loading full />;
   if (!shop || shop.status !== "APPROVED") return <Navigate to="/merchant/onboarding" replace />;
+
+  const changeShop = async (shopId) => {
+    try {
+      await api.put("/shops/mine/active", { shop_id: shopId });
+      window.location.assign("/merchant");
+    } catch (e) {
+      toast.error(apiErr(e));
+    }
+  };
+  const headerAction = (
+    <div className="hidden sm:flex items-center gap-2">
+      {shops.length > 1 && (
+        <Select value={shop.id} onValueChange={changeShop}>
+          <SelectTrigger className="w-44 h-9" data-testid="merchant-shop-switcher"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {shops.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      )}
+      <Button variant="outline" size="sm" onClick={() => navigate("/merchant/onboarding?new=1")} data-testid="merchant-add-shop">
+        <Plus className="w-4 h-4 mr-1" /> Boutique
+      </Button>
+    </div>
+  );
 
   const nav = [
     { to: "/merchant", label: t("dashboard"), icon: Home, testid: "overview" },
@@ -52,26 +78,30 @@ export function MerchantLayout() {
     { to: "/merchant/stats", label: t("statistics"), icon: BarChart3, testid: "stats" },
     { to: "/merchant/loyalty", label: t("loyalty"), icon: Gift, testid: "loyalty" },
     { to: "/merchant/promotions", label: t("promos"), icon: Tag, testid: "promotions" },
+    { to: "/merchant/daily-offers", label: "Offre du jour", icon: Gift, testid: "daily-offers" },
     { to: "/merchant/settings", label: t("settings"), icon: Settings, testid: "settings" },
     { to: "/merchant/account", label: "Mon compte", icon: UserCog, testid: "account" },
   ];
   return (
     <MerchantCtx.Provider value={{ shop, reload }}>
-      <DashboardShell nav={nav} title={shop.name} subtitle="Espace commerçant" />
+      <DashboardShell nav={nav} title={shop.name} subtitle="Espace commerçant" headerAction={headerAction} />
     </MerchantCtx.Provider>
   );
 }
 
 /* ---------------- Onboarding ---------------- */
 export function MerchantOnboarding() {
-  const { user, refresh } = useAuth();
+  const { user, refresh, switchProfile } = useAuth();
   const navigate = useNavigate();
   const [shop, setShop] = useState(undefined);
+  const [shops, setShops] = useState([]);
   const [kyc, setKyc] = useState(null);
   const [countries, setCountries] = useState([]);
+  const [searchParams] = useSearchParams();
+  const [addingShop, setAddingShop] = useState(searchParams.get("new") === "1");
 
   const load = () => {
-    api.get("/shops/mine").then((r) => setShop(r.data.shop)).catch(() => setShop(null));
+    api.get("/shops/mine").then((r) => { setShop(r.data.shop); setShops(r.data.shops || []); }).catch(() => setShop(null));
     api.get("/kyc/mine").then((r) => setKyc(r.data.kyc)).catch(() => {});
   };
   useEffect(() => {
@@ -79,7 +109,17 @@ export function MerchantOnboarding() {
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
   }, []);
 
-  useEffect(() => { if (shop && shop.status === "APPROVED") navigate("/merchant"); }, [shop, navigate]);
+  useEffect(() => { if (shop && shop.status === "APPROVED" && !addingShop) navigate("/merchant"); }, [shop, navigate, addingShop]);
+
+  const selectShop = async (shopId) => {
+    try {
+      const { data } = await api.put("/shops/mine/active", { shop_id: shopId });
+      setShop(data.shop);
+      setAddingShop(false);
+    } catch (e) {
+      toast.error(apiErr(e));
+    }
+  };
 
   const phoneOk = user?.phone_verified;
   const emailOk = user?.email_verified;
@@ -108,7 +148,15 @@ export function MerchantOnboarding() {
             <div className="w-9 h-9 rounded-xl bg-primary grid place-items-center font-display font-extrabold">A</div>
             <span className="font-display font-extrabold">AfriMarket</span>
           </Link>
-          <span className="text-sm text-neutral-300">Créer votre boutique</span>
+          <div className="flex items-center gap-3">
+            {(user?.profiles || []).includes("CLIENT") && (
+              <Button variant="outline" size="sm" onClick={async () => {
+                try { await switchProfile("CLIENT"); navigate("/account"); }
+                catch { toast.error("Impossible de changer de profil."); }
+              }} data-testid="merchant-onboarding-client-profile">Espace client</Button>
+            )}
+            <span className="text-sm text-neutral-300">Créer votre boutique</span>
+          </div>
         </div>
       </div>
       <div className="max-w-3xl mx-auto px-4 py-8 space-y-4">
@@ -124,13 +172,34 @@ export function MerchantOnboarding() {
         </Step>
 
         <Step n={4} title="Créer la boutique" done={shopCreated}>
-          {shopCreated ? (
+          {shops.length > 0 && (
+            <div className="mb-4 space-y-2" data-testid="merchant-shop-list">
+              <Label>Vos boutiques</Label>
+              {shops.map((item) => (
+                <button key={item.id} type="button" onClick={() => selectShop(item.id)}
+                  className={`w-full rounded-lg border px-3 py-2 text-left text-sm flex items-center justify-between gap-3 ${shop?.id === item.id ? "border-primary bg-primary/5" : "border-border"}`}
+                  data-testid={`merchant-shop-${item.id}`}>
+                  <span className="font-medium truncate">{item.name}</span>
+                  <StatusBadge status={item.status} />
+                </button>
+              ))}
+            </div>
+          )}
+          {shopCreated && !addingShop ? (
             <div className="text-sm">
               <div className="font-medium">{shop.name} — {shop.city}, {shop.country}</div>
               <div className="mt-1">Statut : <StatusBadge status={shop.status} /></div>
               {shop.status === "REJECTED" && <div className="text-destructive text-sm mt-2">Motif : {shop.rejection_reason}</div>}
+              <Button variant="outline" className="rounded-full mt-3" onClick={() => setAddingShop(true)} data-testid="add-another-shop">
+                <Plus className="w-4 h-4 mr-1" /> Créer une autre boutique
+              </Button>
             </div>
-          ) : <ShopForm countries={countries} onDone={load} disabled={!kycSubmitted} />}
+          ) : <ShopForm countries={countries} onDone={(createdShop) => {
+            setShop(createdShop);
+            setShops((current) => [createdShop, ...current.filter((item) => item.id !== createdShop.id)]);
+            setAddingShop(false);
+            load();
+          }} disabled={!kycSubmitted} />}
         </Step>
 
         <Step n={5} title="Soumettre pour validation" done={shopSubmitted && shop.status !== "DRAFT"}>
@@ -217,7 +286,11 @@ function ShopForm({ countries, onDone, disabled }) {
   const [f, setF] = useState({ name: "", country: "", city: "", region: "", zone: "", street: "", phone: "", tax_number: "", description: "", logo: "https://images.unsplash.com/photo-1751374858042-b8b9ff8480aa?q=80&w=400" });
   const upd = (k, v) => setF({ ...f, [k]: v });
   const submit = async () => {
-    try { await api.post("/shops", f); toast.success("Boutique créée"); onDone(); }
+    if (!f.name.trim() || !f.country || !f.city.trim()) {
+      toast.error("Le nom de la boutique, le pays et la ville sont obligatoires.");
+      return;
+    }
+    try { const { data } = await api.post("/shops", f); toast.success("Boutique créée"); onDone(data.shop); }
     catch (e) { toast.error(apiErr(e)); }
   };
   return (
@@ -841,8 +914,32 @@ export function MerchantSettings() {
   const { shop, reload } = useMerchant();
   const [coef, setCoef] = useState(shop.coefficients || { partner: 0.5, professional: 0.5, enterprise: 0.5 });
   const [prov, setProv] = useState({ provider: shop.payment_provider || "MONITY_WORLD", account: shop.payment_config?.account || "", api_key: shop.payment_config?.api_key || "" });
+  const [storefrontImages, setStorefrontImages] = useState(shop.homepage_images || []);
+  const [uploadingImages, setUploadingImages] = useState(false);
+  useEffect(() => setStorefrontImages(shop.homepage_images || []), [shop.id, shop.homepage_images]);
   const save = async () => { try { await api.put(`/shops/${shop.id}/coefficients`, { partner: Number(coef.partner), professional: Number(coef.professional), enterprise: Number(coef.enterprise) }); toast.success("Coefficients enregistrés"); reload(); } catch (e) { toast.error(apiErr(e)); } };
   const savePayment = async () => { try { await api.put(`/shops/${shop.id}/payment`, prov); toast.success("Paiement enregistré"); reload(); } catch (e) { toast.error(apiErr(e)); } };
+  const saveStorefrontImages = async (images) => {
+    try {
+      const { data } = await api.put(`/shops/${shop.id}/storefront-images`, { images });
+      setStorefrontImages(data.images || []);
+      toast.success("Images de la boutique enregistrées");
+      reload();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const uploadStorefrontImages = async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    if (storefrontImages.length + files.length > 10) { toast.error("Maximum 10 images pour la boutique."); return; }
+    setUploadingImages(true);
+    try {
+      const images = [...storefrontImages];
+      for (const file of files) images.push(await uploadImage(file));
+      await saveStorefrontImages(images);
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setUploadingImages(false); }
+  };
   return (
     <div>
       <PageHeader title="Paramètres" subtitle="Boutique & coefficients de recette" />
@@ -860,6 +957,23 @@ export function MerchantSettings() {
             <div key={k} className="mb-3"><Label>{l}</Label><Input type="number" step="0.1" min="0" max="1" value={coef[k]} onChange={(e) => setCoef({ ...coef, [k]: e.target.value })} className="mt-1" data-testid={`coef-${k}`} /></div>
           ))}
           <Button className="rounded-full mt-2" onClick={save} data-testid="save-coefficients">Enregistrer</Button>
+        </div>
+        <div className="bg-card border border-border rounded-xl p-5 lg:col-span-2" data-testid="shop-storefront-images">
+          <h3 className="font-display font-bold mb-1">Images de la page boutique</h3>
+          <p className="text-xs text-muted-foreground mb-3">Ajoutez jusqu’à 10 images qui défileront automatiquement sur votre page publique.</p>
+          <Label htmlFor="shop-storefront-upload">Téléverser des images</Label>
+          <Input id="shop-storefront-upload" type="file" accept="image/*" multiple className="mt-1" onChange={uploadStorefrontImages} disabled={uploadingImages} data-testid="shop-storefront-upload" />
+          {uploadingImages && <p className="mt-2 text-xs text-muted-foreground">Téléversement en cours…</p>}
+          {storefrontImages.length > 0 && (
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-3">
+              {storefrontImages.map((image, index) => (
+                <div key={`${image}-${index}`} className="relative">
+                  <img src={image} alt={`Boutique ${index + 1}`} className="h-24 w-full rounded-lg object-cover" />
+                  <Button type="button" variant="destructive" size="sm" className="absolute right-1 top-1 h-7 px-2" onClick={() => saveStorefrontImages(storefrontImages.filter((_, i) => i !== index))} aria-label={`Supprimer l’image ${index + 1}`}>×</Button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="bg-card border border-border rounded-xl p-5 lg:col-span-2">
           <h3 className="font-display font-bold mb-1">Système de paiement</h3>
@@ -883,6 +997,94 @@ export function MerchantSettings() {
           <Button className="rounded-full mt-3" onClick={savePayment} data-testid="save-payment">Enregistrer le paiement</Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+export function MerchantDailyOffers() {
+  const { shop } = useMerchant();
+  const [products, setProducts] = useState([]);
+  const [choices, setChoices] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.get("/daily-offers/mine")
+      .then((r) => setProducts(r.data.products || []))
+      .catch((e) => { toast.error(apiErr(e)); setProducts([]); })
+      .finally(() => setLoading(false));
+  }, [shop.id]);
+  useEffect(() => { load(); }, [load]);
+
+  const updateChoice = (productId, patch) => {
+    setChoices((current) => ({
+      ...current,
+      [productId]: { mode: "percent", value: "0", ...(current[productId] || {}), ...patch },
+    }));
+  };
+  const approve = async (product) => {
+    const choice = choices[product.id] || { mode: "percent", value: "0" };
+    const payload = { offer_id: product.daily_offer.id };
+    if (choice.mode === "price" && choice.value !== "") payload.fixed_price = Number(choice.value);
+    else payload.discount_percent = Number(choice.value || 0);
+    setBusy(product.id);
+    try {
+      await api.post(`/daily-offers/${product.id}/approve`, payload);
+      toast.success("Offre du jour activée");
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(""); }
+  };
+
+  return (
+    <div>
+      <PageHeader title="Offres du jour" subtitle={`Propositions pour la boutique ${shop.name}`} action={<Button variant="outline" onClick={load}>Actualiser</Button>} />
+      {loading ? <Loading /> : products.length === 0 ? (
+        <EmptyState title="Aucune proposition" description="Les prochaines propositions automatiques apparaîtront ici." />
+      ) : (
+        <div className="grid gap-4">
+          {products.map((product) => {
+            const offer = product.daily_offer || {};
+            const choice = choices[product.id] || { mode: "percent", value: "0" };
+            return (
+              <article key={product.id} className="bg-card border border-border rounded-xl p-4 flex flex-col sm:flex-row gap-4" data-testid={`daily-offer-${product.id}`}>
+                <img src={product.image} alt="" className="w-24 h-24 rounded-lg object-cover shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <h2 className="font-display font-bold">{product.name}</h2>
+                  <p className="text-sm text-muted-foreground mt-1">Prix normal : {money(Number(product.price_simple || 0), shop.currency)}</p>
+                  {offer.status === "PENDING" ? (
+                    <>
+                      <p className="text-xs text-amber-700 mt-2">Répondez avant le {new Date(offer.review_deadline).toLocaleString("fr-FR")}. Sans réponse après 24 h, le produit sera mis en avant à son prix normal.</p>
+                      <div className="mt-3 flex flex-wrap items-end gap-2">
+                        <div>
+                          <Label htmlFor={`offer-mode-${product.id}`}>Type de proposition</Label>
+                          <select id={`offer-mode-${product.id}`} value={choice.mode} onChange={(event) => updateChoice(product.id, { mode: event.target.value })} className="mt-1 h-10 rounded-md border border-border bg-card px-3 text-sm">
+                            <option value="percent">Réduction (%)</option>
+                            <option value="price">Nouveau prix</option>
+                          </select>
+                        </div>
+                        <div>
+                          <Label htmlFor={`offer-value-${product.id}`}>{choice.mode === "price" ? `Prix (${shop.currency})` : "Réduction (%)"}</Label>
+                          <Input id={`offer-value-${product.id}`} type="number" min={choice.mode === "price" ? "0.01" : "0"} max={choice.mode === "price" ? undefined : "100"} step={choice.mode === "price" ? "0.01" : "1"} value={choice.value} onChange={(event) => updateChoice(product.id, { value: event.target.value })} className="mt-1 w-40" data-testid={`offer-value-${product.id}`} />
+                        </div>
+                        <Button onClick={() => approve(product)} disabled={busy === product.id} data-testid={`approve-offer-${product.id}`}>
+                          {busy === product.id ? "Activation…" : "Approuver l’offre"}
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-sm text-primary">
+                      {Number(offer.discount_percent || 0) > 0 ? `Réduction de ${offer.discount_percent} %` : "Sélection qualité — prix normal"}
+                      {offer.ends_at && ` · jusqu’au ${new Date(offer.ends_at).toLocaleString("fr-FR")}`}
+                    </p>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
