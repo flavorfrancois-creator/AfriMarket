@@ -2872,8 +2872,8 @@ async def my_withdrawals(user: dict = Depends(get_current_user)):
 # ---------------- Notifications ----------------
 @api.get("/notifications")
 async def get_notifications(user: dict = Depends(get_current_user)):
-    notifs = await db.notifications.find({"user_id": user["id"]}).sort("created_at", -1).to_list(100)
-    unread = sum(1 for n in notifs if not n.get("read"))
+    notifs = await db.notifications.find({"user_id": user["id"], "read": {"$ne": True}}).sort("created_at", -1).to_list(100)
+    unread = len(notifs)
     return {"notifications": [serialize(n) for n in notifs], "unread": unread}
 
 

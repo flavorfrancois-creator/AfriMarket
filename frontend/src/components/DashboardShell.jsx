@@ -98,7 +98,7 @@ export function DashboardShell({ nav, title, subtitle, headerAction }) {
   const loadNotifs = async () => {
     try {
       const { data } = await api.get("/notifications");
-      setNotifs(data.notifications);
+      setNotifs(data.notifications.filter((notification) => !notification.read));
       setUnread(data.unread);
     } catch {}
   };
@@ -106,12 +106,14 @@ export function DashboardShell({ nav, title, subtitle, headerAction }) {
 
   const markAll = async () => {
     await api.put("/notifications/read-all");
+    setNotifs([]);
+    setUnread(0);
     loadNotifs();
   };
 
   const openNotification = async (notification) => {
     if (!notification.read) {
-      setNotifs((items) => items.map((item) => item.id === notification.id ? { ...item, read: true } : item));
+      setNotifs((items) => items.filter((item) => item.id !== notification.id));
       setUnread((count) => Math.max(0, count - 1));
       try {
         await api.put(`/notifications/${notification.id}/read`);
