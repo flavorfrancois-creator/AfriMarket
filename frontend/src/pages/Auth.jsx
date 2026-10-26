@@ -22,7 +22,7 @@ function AuthShell({ children, title, sub }) {
         <div className="absolute inset-0 bg-neutral-950/50" />
         <div className="relative h-full flex flex-col justify-between p-12 text-white">
           <Link to="/" className="flex items-center gap-2">
-            <div className="w-10 h-10 rounded-xl bg-primary grid place-items-center font-display font-extrabold">A</div>
+            <img src="/africashop.png" alt="" className="w-10 h-10 rounded-xl object-contain" />
             <span className="font-display font-extrabold text-xl">AfriMarket</span>
           </Link>
           <div>
@@ -34,7 +34,7 @@ function AuthShell({ children, title, sub }) {
       <div className="flex items-center justify-center p-6">
         <div className="w-full max-w-md">
           <Link to="/" className="lg:hidden flex items-center gap-2 mb-8">
-            <div className="w-9 h-9 rounded-xl bg-primary text-primary-foreground grid place-items-center font-display font-extrabold">A</div>
+            <img src="/africashop.png" alt="" className="w-9 h-9 rounded-xl object-contain" />
             <span className="font-display font-extrabold text-lg">AfriMarket</span>
           </Link>
           <h1 className="text-2xl font-display font-extrabold">{title}</h1>
