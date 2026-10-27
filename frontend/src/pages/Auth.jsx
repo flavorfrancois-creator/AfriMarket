@@ -31,12 +31,16 @@ function AuthShell({ children, title, sub }) {
           </div>
         </div>
       </div>
+      <div className="relative h-52 lg:hidden">
+        <img src={SIDE_IMG} alt="" className="absolute inset-0 h-full w-full object-cover" />
+        <div className="absolute inset-0 bg-neutral-950/50" />
+        <Link to="/" className="relative flex h-full flex-col items-center justify-center gap-2 text-white">
+          <img src="/africashop.png" alt="" className="h-16 w-16 object-contain" />
+          <span className="font-display text-xl font-extrabold">AfriMarket</span>
+        </Link>
+      </div>
       <div className="flex items-center justify-center p-6">
         <div className="w-full max-w-md">
-          <Link to="/" className="lg:hidden flex items-center gap-2 mb-8">
-            <img src="/africashop.png" alt="" className="w-9 h-9 rounded-xl object-contain" />
-            <span className="font-display font-extrabold text-lg">AfriMarket</span>
-          </Link>
           <h1 className="text-2xl font-display font-extrabold">{title}</h1>
           {sub && <p className="text-muted-foreground text-sm mt-1 mb-6">{sub}</p>}
           {children}
