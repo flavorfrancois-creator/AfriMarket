@@ -1,5 +1,6 @@
 import os
 import io
+import asyncio
 import csv
 import math
 import hashlib
@@ -8,7 +9,9 @@ import random
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
+from urllib.parse import urlsplit
 
+import requests
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Query
 from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.cors import CORSMiddleware
@@ -37,6 +40,7 @@ import payapis
 import accounts
 import categories
 import sms_relay
+from supplier_import import SupplierPageError, fetch_supplier_page, validate_supplier_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -180,6 +184,14 @@ class ProfileSwitchReq(BaseModel):
     profile: str
 
 
+class MerchantAccessRequestReq(BaseModel):
+    accept_terms: bool
+
+
+class MerchantAccessDecisionReq(BaseModel):
+    reason: Optional[str] = ""
+
+
 class ActiveShopReq(BaseModel):
     shop_id: str
 
@@ -256,6 +268,26 @@ class ProductReq(BaseModel):
     shipping_fee: float = 0
     promo: dict = {}
     variants: List[dict] = []
+
+
+class SupplierImportReq(BaseModel):
+    source_url: str
+
+
+class SupplierImportItemReq(BaseModel):
+    name: Optional[str] = None
+    short_description: Optional[str] = None
+    description: Optional[str] = None
+    image: Optional[str] = None
+    gallery: Optional[List[str]] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    stock: Optional[int] = None
+    price_simple: Optional[float] = None
+    price_partner: Optional[float] = None
+    price_pro: Optional[float] = None
+    price_enterprise: Optional[float] = None
+    shipping_fee: Optional[float] = None
 
 
 class StockAdjustReq(BaseModel):
@@ -1814,6 +1846,24 @@ async def cron_daily_offers(request: Request, background_tasks: BackgroundTasks)
     return {"status": "accepted"}
 
 
+@api.get("/products/supplier-imports")
+async def list_supplier_imports(user: dict = Depends(require_roles("MERCHANT"))):
+    shop = await _my_shop(user)
+    if not shop:
+        return {"sessions": []}
+    sessions = await db.supplier_import_sessions.find(
+        {"owner_id": user["id"], "shop_id": shop["id"]}
+    ).sort("created_at", -1).to_list(100)
+    result = []
+    for session in sessions:
+        view = _supplier_import_session_view(session)
+        view["pending_count"] = await db.supplier_import_items.count_documents(
+            {"import_id": session["id"], "status": "PENDING"}
+        )
+        result.append(view)
+    return {"sessions": result}
+
+
 @api.get("/products/{product_id}")
 async def get_product(product_id: str, request: Request, for_client: bool = False):
     product = await db.products.find_one({"id": product_id})
@@ -1975,6 +2025,367 @@ async def import_products(file: UploadFile = File(...), user: dict = Depends(req
 async def get_features(user: dict = Depends(get_current_user)):
     settings = await get_settings()
     return {"csv_import_enabled": bool(settings.get("csv_import_enabled", False))}
+
+
+def _supplier_import_session_view(session: dict) -> dict:
+    result = serialize(session)
+    for key in ("owner_id", "source_root", "pending_urls", "seen_urls", "visited_pages", "continuing"):
+        result.pop(key, None)
+    result["can_continue"] = bool(session.get("pending_urls") or session.get("next_url"))
+    return result
+
+
+async def _supplier_import_item_views(import_id: str):
+    rows = await db.supplier_import_items.find({"import_id": import_id}).sort("position", 1).to_list(10000)
+    result = []
+    for row in rows:
+        item = serialize(row)
+        item.pop("owner_id", None)
+        result.append(item)
+    return result
+
+
+async def _owned_supplier_import(import_id: str, user: dict):
+    session = await db.supplier_import_sessions.find_one({"id": import_id, "owner_id": user["id"]})
+    if not session:
+        raise HTTPException(status_code=404, detail="Import fournisseur introuvable.")
+    shop = await db.shops.find_one({"id": session["shop_id"], "owner_id": user["id"]})
+    if not shop:
+        raise HTTPException(status_code=403, detail="Accès refusé à cette boutique.")
+    return session, shop
+
+
+def _is_https_image_url(value: str) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        return False
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme.lower() == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
+        return False
+
+
+async def _save_supplier_import_batch(session: dict, urls: list, remaining_urls: list, next_url: Optional[str]):
+    semaphore = asyncio.Semaphore(4)
+
+    async def read_product(url):
+        async with semaphore:
+            try:
+                page = await asyncio.to_thread(fetch_supplier_page, url, session["source_root"])
+                if not page["product"]:
+                    return url, None, "Aucune fiche produit publique lisible à cette adresse."
+                return url, page["product"], None
+            except SupplierPageError as exc:
+                return url, None, str(exc)
+            except requests.RequestException:
+                return url, None, "Le fournisseur n'a pas répondu à la demande."
+
+    results = await asyncio.gather(*(read_product(url) for url in urls))
+    position = int(session.get("processed_count") or 0)
+    successful = 0
+    errors = list(session.get("errors") or [])
+    for index, (url, product, error) in enumerate(results, start=1):
+        if error:
+            errors.append({"url": url, "message": error[:300]})
+            continue
+        item = {
+            "id": new_id(),
+            "import_id": session["id"],
+            "shop_id": session["shop_id"],
+            "owner_id": session["owner_id"],
+            "position": position + index,
+            "source_url": url,
+            **product,
+            "category": "",
+            "subcategory": "",
+            "stock": 0,
+            "price_simple": 0,
+            "price_partner": 0,
+            "price_pro": 0,
+            "price_enterprise": 0,
+            "shipping_fee": 0,
+            "status": "PENDING",
+            "product_id": None,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        await db.supplier_import_items.insert_one(item)
+        successful += 1
+
+    total_processed = position + len(urls)
+    status = "AWAITING_DECISION" if (remaining_urls or next_url) else "COMPLETED"
+    await db.supplier_import_sessions.update_one(
+        {"id": session["id"], "owner_id": session["owner_id"]},
+        {"$set": {
+            "pending_urls": remaining_urls,
+            "next_url": next_url,
+            "processed_count": total_processed,
+            "imported_count": int(session.get("imported_count") or 0) + successful,
+            "batch_number": int(session.get("batch_number") or 0) + 1,
+            "errors": errors[-100:],
+            "seen_urls": session.get("seen_urls") or [],
+            "visited_pages": session.get("visited_pages") or [],
+            "status": status,
+            "updated_at": now_iso(),
+        }},
+    )
+    refreshed = await db.supplier_import_sessions.find_one({"id": session["id"]})
+    return {"session": _supplier_import_session_view(refreshed), "items": await _supplier_import_item_views(session["id"])}
+
+
+@api.post("/products/supplier-imports")
+async def start_supplier_import(req: SupplierImportReq, user: dict = Depends(require_roles("MERCHANT"))):
+    shop = await _my_shop(user)
+    if not shop or shop.get("status") != "APPROVED" or shop.get("suspended"):
+        raise HTTPException(status_code=403, detail="Votre boutique doit être approuvée et active.")
+    try:
+        source_url, root = await asyncio.to_thread(validate_supplier_url, req.source_url)
+        page = await asyncio.to_thread(fetch_supplier_page, source_url, root)
+    except SupplierPageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Le fournisseur n'a pas répondu à la demande.")
+
+    if page["product"]:
+        kind = "PRODUCT"
+        discovered_urls = [source_url]
+        pending_urls = discovered_urls
+    else:
+        kind = "STORE"
+        discovered_urls = list(dict.fromkeys(page["product_links"]))[:10000]
+        pending_urls = discovered_urls
+        if not pending_urls and not page["next_url"]:
+            raise HTTPException(
+                status_code=422,
+                detail="Aucune fiche produit publique n’a été détectée. La boutique peut nécessiter une API officielle ou un accès non disponible.",
+            )
+
+    session = {
+        "id": new_id(),
+        "owner_id": user["id"],
+        "shop_id": shop["id"],
+        "shop_name": shop["name"],
+        "source_url": source_url,
+        "source_root": root,
+        "kind": kind,
+        "pending_urls": pending_urls,
+        "seen_urls": discovered_urls,
+        "visited_pages": [source_url],
+        "next_url": page["next_url"] if kind == "STORE" else None,
+        "processed_count": 0,
+        "imported_count": 0,
+        "batch_number": 0,
+        "errors": [],
+        "status": "IMPORTING",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.supplier_import_sessions.insert_one(session)
+    batch = pending_urls[:20]
+    remainder = pending_urls[len(batch):]
+    if not batch:
+        await db.supplier_import_sessions.update_one(
+            {"id": session["id"]},
+            {"$set": {"status": "AWAITING_DECISION", "updated_at": now_iso()}},
+        )
+        refreshed = await db.supplier_import_sessions.find_one({"id": session["id"]})
+        return {"session": _supplier_import_session_view(refreshed), "items": []}
+    return await _save_supplier_import_batch(session, batch, remainder, session["next_url"])
+
+
+@api.get("/products/supplier-imports/{import_id}")
+async def get_supplier_import(import_id: str, user: dict = Depends(require_roles("MERCHANT"))):
+    session, _ = await _owned_supplier_import(import_id, user)
+    return {"session": _supplier_import_session_view(session), "items": await _supplier_import_item_views(import_id)}
+
+
+@api.post("/products/supplier-imports/{import_id}/continue")
+async def continue_supplier_import(import_id: str, user: dict = Depends(require_roles("MERCHANT"))):
+    session, _ = await _owned_supplier_import(import_id, user)
+    if session.get("status") == "COMPLETED" or not (session.get("pending_urls") or session.get("next_url")):
+        raise HTTPException(status_code=409, detail="Cet import est terminé.")
+    lock = await db.supplier_import_sessions.update_one(
+        {"id": import_id, "owner_id": user["id"], "continuing": {"$ne": True}},
+        {"$set": {"continuing": True}},
+    )
+    if not lock.modified_count:
+        raise HTTPException(status_code=409, detail="Une séquence d’import est déjà en cours.")
+    try:
+        pending_urls = list(session.get("pending_urls") or [])
+        seen_urls = set(session.get("seen_urls") or [])
+        visited_pages = set(session.get("visited_pages") or [])
+        next_url = session.get("next_url")
+        if len(pending_urls) < 20 and next_url and next_url not in visited_pages:
+            page = await asyncio.to_thread(fetch_supplier_page, next_url, session["source_root"])
+            visited_pages.add(next_url)
+            seen_urls.add(next_url)
+            for url in page["product_links"]:
+                if url not in seen_urls:
+                    pending_urls.append(url)
+                    seen_urls.add(url)
+            next_url = page["next_url"]
+            if next_url in visited_pages:
+                next_url = None
+        if not pending_urls:
+            await db.supplier_import_sessions.update_one(
+                {"id": import_id},
+                {"$set": {"pending_urls": [], "next_url": next_url, "seen_urls": list(seen_urls),
+                          "visited_pages": list(visited_pages), "status": "COMPLETED", "updated_at": now_iso()},
+                 "$unset": {"continuing": ""}},
+            )
+            refreshed = await db.supplier_import_sessions.find_one({"id": import_id})
+            return {"session": _supplier_import_session_view(refreshed), "items": await _supplier_import_item_views(import_id)}
+        batch = pending_urls[:20]
+        remaining_urls = pending_urls[len(batch):]
+        session.update({"seen_urls": list(seen_urls), "visited_pages": list(visited_pages)})
+        response = await _save_supplier_import_batch(session, batch, remaining_urls, next_url)
+        return response
+    except SupplierPageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except requests.RequestException:
+        raise HTTPException(status_code=502, detail="Le fournisseur n'a pas répondu à la demande.")
+    finally:
+        await db.supplier_import_sessions.update_one({"id": import_id}, {"$unset": {"continuing": ""}})
+
+
+@api.post("/products/supplier-imports/{import_id}/pause")
+async def pause_supplier_import(import_id: str, user: dict = Depends(require_roles("MERCHANT"))):
+    session, _ = await _owned_supplier_import(import_id, user)
+    await db.supplier_import_sessions.update_one(
+        {"id": session["id"], "owner_id": user["id"], "continuing": {"$ne": True}},
+        {"$set": {"status": "PAUSED", "updated_at": now_iso()}},
+    )
+    refreshed = await db.supplier_import_sessions.find_one({"id": session["id"]})
+    return {"session": _supplier_import_session_view(refreshed)}
+
+
+@api.put("/products/supplier-imports/{import_id}/items/{item_id}")
+async def update_supplier_import_item(import_id: str, item_id: str, req: SupplierImportItemReq,
+                                      user: dict = Depends(require_roles("MERCHANT"))):
+    session, _ = await _owned_supplier_import(import_id, user)
+    item = await db.supplier_import_items.find_one({
+        "id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING",
+    })
+    if not item:
+        raise HTTPException(status_code=404, detail="Produit à valider introuvable.")
+    update = req.model_dump(exclude_unset=True)
+    for key, limit in (("name", 200), ("short_description", 500), ("description", 10000),
+                       ("category", 100), ("subcategory", 100)):
+        if key in update:
+            update[key] = str(update[key] or "").strip()[:limit]
+    images = []
+    if "image" in update:
+        images.append(update["image"] or "")
+    if "gallery" in update:
+        if len(update["gallery"] or []) > 20:
+            raise HTTPException(status_code=400, detail="Maximum 20 images par produit.")
+        images.extend(update["gallery"] or [])
+    for image in images:
+        if image and not _is_https_image_url(image):
+            raise HTTPException(status_code=400, detail="Chaque image doit utiliser une adresse HTTPS valide.")
+    for key in ("stock", "price_simple", "price_partner", "price_pro", "price_enterprise", "shipping_fee"):
+        if key in update:
+            if update[key] is None or not math.isfinite(float(update[key])) or float(update[key]) < 0:
+                raise HTTPException(status_code=400, detail="Stock, prix et frais de transport doivent être positifs.")
+    update["updated_at"] = now_iso()
+    await db.supplier_import_items.update_one({"id": item_id}, {"$set": update})
+    refreshed = await db.supplier_import_items.find_one({"id": item_id})
+    result = serialize(refreshed)
+    result.pop("owner_id", None)
+    return {"item": result}
+
+
+@api.post("/products/supplier-imports/{import_id}/items/{item_id}/publish")
+async def publish_supplier_import_item(import_id: str, item_id: str, user: dict = Depends(require_roles("MERCHANT"))):
+    session, shop = await _owned_supplier_import(import_id, user)
+    item = await db.supplier_import_items.find_one({
+        "id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING",
+    })
+    if not item:
+        raise HTTPException(status_code=404, detail="Produit à valider introuvable.")
+    prices = [float(item.get(key) or 0) for key in ("price_simple", "price_partner", "price_pro", "price_enterprise")]
+    if not item.get("name", "").strip() or any(not math.isfinite(price) or price <= 0 for price in prices):
+        raise HTTPException(status_code=400, detail="Complétez le nom et les quatre prix de vente avant de publier.")
+    if int(item.get("stock") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="Indiquez un stock supérieur à zéro avant de publier.")
+    if not math.isfinite(float(item.get("shipping_fee") or 0)) or float(item.get("shipping_fee") or 0) < 0:
+        raise HTTPException(status_code=400, detail="Les frais de transport doivent être positifs ou égaux à zéro.")
+    if item.get("image") and not _is_https_image_url(item["image"]):
+        raise HTTPException(status_code=400, detail="L’image principale doit être une adresse HTTPS valide.")
+    if any(not _is_https_image_url(image) for image in item.get("gallery") or []):
+        raise HTTPException(status_code=400, detail="Toutes les images doivent utiliser une adresse HTTPS valide.")
+    await categories.check_pair(item.get("category") or "", item.get("subcategory") or "")
+    settings = await get_settings()
+    quota = shop.get("product_quota") or settings.get("default_product_quota", 0) or 0
+    existing = await db.products.count_documents({"shop_id": shop["id"], "status": {"$ne": "DELETED"}})
+    if quota > 0 and existing >= quota:
+        raise HTTPException(status_code=403, detail=f"Quota de produits atteint ({quota}).")
+    storage_quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
+    if storage_quota_mb > 0:
+        used = await _shop_storage_bytes(shop["id"])
+        if used + _product_img_bytes(item.get("image", ""), item.get("gallery", [])) > storage_quota_mb * 1024 * 1024:
+            raise HTTPException(status_code=403, detail=f"Quota de stockage atteint ({storage_quota_mb} Mo).")
+
+    product_id = item.get("product_id") or new_id()
+    claim = await db.supplier_import_items.find_one_and_update(
+        {"id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING"},
+        {"$set": {"status": "PUBLISHING", "product_id": product_id, "updated_at": now_iso()}},
+    )
+    if not claim:
+        raise HTTPException(status_code=409, detail="Ce produit a déjà été traité.")
+    try:
+        product = {
+            "id": product_id, "shop_id": shop["id"], "shop_name": shop["name"],
+            "currency": shop["currency"], "currency_symbol": shop.get("currency_symbol", ""),
+            "name": item["name"].strip(), "short_description": item.get("short_description", ""),
+            "description": item.get("description", ""), "image": item.get("image", ""),
+            "gallery": item.get("gallery") or [], "category": item.get("category") or "",
+            "subcategory": item.get("subcategory") or "", "genre": "", "usage": "",
+            "attributes": {"brand": item.get("brand", "")},
+            "weight": 0, "dimensions": "", "sku": item.get("sku") or gen_sku(),
+            "stock": int(item["stock"]), "alert_threshold": 5,
+            "price_simple": prices[0], "price_partner": prices[1], "price_pro": prices[2],
+            "price_enterprise": prices[3], "shipping_fee": float(item.get("shipping_fee") or 0),
+            "promo": {}, "variants": [], "status": "ACTIVE", "moderation_status": "PENDING",
+            "moderation_reason": "", "views": 0, "sold": 0, "flagged": False,
+            "initial_stock": int(item["stock"]), "created_at": now_iso(), "is_demo": False,
+        }
+        if not await db.products.find_one({"id": product_id}):
+            await db.products.insert_one(product)
+        movement = {
+            "id": f"SUPPLIER-{product_id}", "product_id": product_id, "shop_id": shop["id"],
+            "type": "ENTREE", "quantity": product["stock"], "reason": "Import fournisseur",
+            "actor_id": user["id"], "created_at": now_iso(),
+        }
+        await db.inventory_movements.update_one(
+            {"id": movement["id"]}, {"$setOnInsert": movement}, upsert=True,
+        )
+        await db.supplier_import_items.update_one(
+            {"id": item_id, "status": "PUBLISHING"},
+            {"$set": {"status": "IMPORTED", "product_id": product["id"], "updated_at": now_iso()}},
+        )
+    except Exception:
+        await db.supplier_import_items.update_one(
+            {"id": item_id, "status": "PUBLISHING"},
+            {"$set": {"status": "PENDING", "updated_at": now_iso()}},
+        )
+        raise
+    await audit_log(user, "IMPORT_SUPPLIER_PRODUCT", "product", product["id"], None, item["source_url"])
+    await _notify_moderators("PRODUCT_MODERATION", "Produit importé à valider",
+                             f"Le produit « {product['name']} » importé par {shop['name']} attend une validation.", "/admin/products")
+    return {"message": "Produit envoyé en modération", "product": serialize(product)}
+
+
+@api.post("/products/supplier-imports/{import_id}/items/{item_id}/dismiss")
+async def dismiss_supplier_import_item(import_id: str, item_id: str, user: dict = Depends(require_roles("MERCHANT"))):
+    session, _ = await _owned_supplier_import(import_id, user)
+    result = await db.supplier_import_items.update_one(
+        {"id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING"},
+        {"$set": {"status": "DISMISSED", "updated_at": now_iso()}},
+    )
+    if not result.modified_count:
+        raise HTTPException(status_code=404, detail="Produit à ignorer introuvable.")
+    return {"message": "Produit ignoré"}
 
 
 # ---------------- Checkout / Orders ----------------
@@ -2994,6 +3405,112 @@ async def admin_shops(status: Optional[str] = None, user: dict = Depends(require
     return {"shops": result}
 
 
+@api.get("/admin/my-merchant-access-request")
+async def my_merchant_access_request(user: dict = Depends(require_roles("ADMIN"))):
+    request_doc = await db.merchant_access_requests.find_one(
+        {"user_id": user["id"]}, sort=[("created_at", -1)]
+    )
+    return {"request": serialize(request_doc) if request_doc else None}
+
+
+@api.post("/admin/my-merchant-access-request")
+async def request_merchant_access(req: MerchantAccessRequestReq, user: dict = Depends(require_roles("ADMIN"))):
+    if not req.accept_terms:
+        raise HTTPException(status_code=400, detail="L’acceptation des conditions commerçant est obligatoire.")
+    profiles = user.get("profiles") or [user.get("role")]
+    if "MERCHANT" in profiles:
+        raise HTTPException(status_code=409, detail="Ce compte dispose déjà du profil commerçant.")
+    existing = await db.merchant_access_requests.find_one(
+        {"user_id": user["id"]}, sort=[("created_at", -1)]
+    )
+    if existing and existing["status"] in ("PENDING", "REVIEWING"):
+        return {"request": serialize(existing)}
+    if existing and existing["status"] == "APPROVED":
+        raise HTTPException(status_code=409, detail="L’accès commerçant a déjà été autorisé.")
+    doc = {
+        "id": existing["id"] if existing else new_id(),
+        "user_id": user["id"],
+        "name": user.get("name", ""),
+        "email": user.get("email", ""),
+        "status": "PENDING",
+        "reason": "",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "reviewed_at": None,
+        "reviewed_by": None,
+    }
+    if existing:
+        await db.merchant_access_requests.update_one({"id": existing["id"]}, {"$set": doc})
+    else:
+        await db.merchant_access_requests.insert_one(doc)
+    await audit_log(user, "REQUEST_MERCHANT_ACCESS", "merchant_access_request", doc["id"], None, "PENDING")
+    async for super_admin in db.users.find({"role": "SUPER_ADMIN"}):
+        await notify(str(super_admin["_id"]), "MERCHANT_ACCESS_REQUEST", "Demande d’accès commerçant",
+                     f"{doc['name']} ({doc['email']}) demande l’autorisation d’ouvrir une boutique.", "/admin/shops")
+    return {"request": serialize(doc)}
+
+
+@api.get("/admin/merchant-access-requests")
+async def list_merchant_access_requests(user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    requests = await db.merchant_access_requests.find({"status": "PENDING"}).sort("created_at", 1).to_list(500)
+    return {"requests": [serialize(request_doc) for request_doc in requests]}
+
+
+@api.put("/admin/merchant-access-requests/{request_id}/approve")
+async def approve_merchant_access_request(request_id: str, request: Request,
+                                          user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    request_doc = await db.merchant_access_requests.find_one({"id": request_id, "status": "PENDING"})
+    if not request_doc:
+        raise HTTPException(status_code=409, detail="Cette demande a déjà été traitée.")
+    target = await db.users.find_one({"_id": ObjectId(request_doc["user_id"])})
+    if not target or target.get("role") != "ADMIN":
+        raise HTTPException(status_code=409, detail="Le compte administrateur associé à cette demande n’est plus disponible.")
+    claim = await db.merchant_access_requests.update_one(
+        {"id": request_id, "status": "PENDING"}, {"$set": {"status": "REVIEWING"}}
+    )
+    if not claim.modified_count:
+        raise HTTPException(status_code=409, detail="Cette demande a déjà été traitée.")
+    await db.users.update_one(
+        {"_id": target["_id"]},
+        {"$addToSet": {"profiles": {"$each": ["ADMIN", "MERCHANT"]}},
+         "$set": {"merchant_terms_accepted_at": now_iso(), "merchant_terms_version": "2026-10-26"}},
+    )
+    now = now_iso()
+    await db.merchant_access_requests.update_one(
+        {"id": request_id, "status": "REVIEWING"},
+        {"$set": {"status": "APPROVED", "reviewed_at": now, "reviewed_by": user["id"], "updated_at": now}},
+    )
+    await audit_log(user, "APPROVE_MERCHANT_ACCESS", "merchant_access_request", request_id, "PENDING", "APPROVED", _client_ip(request))
+    await notify(request_doc["user_id"], "MERCHANT_ACCESS_APPROVED", "Accès commerçant autorisé",
+                 "Le super-administrateur a autorisé la création de votre boutique. Vous pouvez maintenant ouvrir votre espace commerçant.",
+                 "/admin/my-shop-request")
+    return {"message": "Accès commerçant autorisé"}
+
+
+@api.put("/admin/merchant-access-requests/{request_id}/reject")
+async def reject_merchant_access_request(request_id: str, req: MerchantAccessDecisionReq, request: Request,
+                                        user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    request_doc = await db.merchant_access_requests.find_one({"id": request_id, "status": "PENDING"})
+    if not request_doc:
+        raise HTTPException(status_code=409, detail="Cette demande a déjà été traitée.")
+    reason = (req.reason or "").strip()[:500]
+    claim = await db.merchant_access_requests.update_one(
+        {"id": request_id, "status": "PENDING"}, {"$set": {"status": "REVIEWING"}}
+    )
+    if not claim.modified_count:
+        raise HTTPException(status_code=409, detail="Cette demande a déjà été traitée.")
+    now = now_iso()
+    await db.merchant_access_requests.update_one(
+        {"id": request_id, "status": "REVIEWING"},
+        {"$set": {"status": "REJECTED", "reason": reason, "reviewed_at": now,
+                  "reviewed_by": user["id"], "updated_at": now}},
+    )
+    await audit_log(user, "REJECT_MERCHANT_ACCESS", "merchant_access_request", request_id, "PENDING", reason, _client_ip(request))
+    await notify(request_doc["user_id"], "MERCHANT_ACCESS_REJECTED", "Demande d’accès commerçant refusée",
+                 reason or "Votre demande d’ouverture de boutique a été refusée.", "/admin/my-shop-request")
+    return {"message": "Demande refusée"}
+
+
 @api.put("/admin/shops/{shop_id}/suspend")
 async def suspend_shop(shop_id: str, req: SuspendReq, request: Request, user: dict = Depends(require_module("shops"))):
     shop = await _shop_or_404(shop_id)
@@ -3034,9 +3551,11 @@ async def set_shop_quota(shop_id: str, req: ShopQuotaReq, request: Request, user
 @api.get("/admin/shops/{shop_id}")
 async def admin_shop_detail(shop_id: str, user: dict = Depends(require_module("shops"))):
     shop = await _shop_or_404(shop_id)
+    owner = await db.users.find_one({"_id": ObjectId(shop["owner_id"])}, {"role": 1})
     kyc = await db.merchant_verifications.find_one({"user_id": shop["owner_id"]})
     kyc_out = serialize(kyc) if kyc else None
     shop_out = serialize(shop)
+    shop_out["owner_role"] = owner.get("role") if owner else None
     shop_out["product_count"] = await db.products.count_documents({"shop_id": shop_id, "status": {"$ne": "DELETED"}})
     shop_out["storage_used_mb"] = _mb(await _shop_storage_bytes(shop_id))
     return {"shop": shop_out, "kyc": kyc_out}
@@ -3047,6 +3566,9 @@ async def approve_shop(shop_id: str, request: Request, user: dict = Depends(requ
     shop = await _shop_or_404(shop_id)
     if shop["status"] not in ("SUBMITTED", "UNDER_REVIEW"):
         raise HTTPException(status_code=400, detail="Seule une boutique soumise peut être approuvée")
+    owner = await db.users.find_one({"_id": ObjectId(shop["owner_id"])}, {"role": 1})
+    if owner and owner.get("role") == "ADMIN" and user.get("role") != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Seul le super-administrateur peut approuver la boutique d’un administrateur.")
     await db.shops.update_one({"id": shop_id}, {"$set": {"status": "APPROVED", "rejection_reason": ""}})
     await audit_log(user, "APPROVE_SHOP", "shop", shop_id, shop["status"], "APPROVED", _client_ip(request))
     await notify(shop["owner_id"], "SHOP_APPROVED", "Boutique approuvée",
@@ -3059,6 +3581,9 @@ async def reject_shop(shop_id: str, payload: dict, request: Request, user: dict 
     shop = await _shop_or_404(shop_id)
     if shop["status"] not in ("SUBMITTED", "UNDER_REVIEW"):
         raise HTTPException(status_code=400, detail="Seule une boutique soumise peut être rejetée")
+    owner = await db.users.find_one({"_id": ObjectId(shop["owner_id"])}, {"role": 1})
+    if owner and owner.get("role") == "ADMIN" and user.get("role") != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="Seul le super-administrateur peut rejeter la boutique d’un administrateur.")
     reason = payload.get("reason", "Non conforme")
     await db.shops.update_one({"id": shop_id}, {"$set": {"status": "REJECTED", "rejection_reason": reason}})
     await audit_log(user, "REJECT_SHOP", "shop", shop_id, shop["status"], "REJECTED", _client_ip(request))

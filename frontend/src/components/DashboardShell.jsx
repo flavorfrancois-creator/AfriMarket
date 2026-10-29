@@ -11,7 +11,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Menu, Bell, User, LogOut, Store, Home } from "lucide-react";
+import { Menu, Bell, User, LogOut, Store, Home, LayoutDashboard } from "lucide-react";
 
 export const isPartnerRole = (role) => role === "RELAY_MANAGER" || role === "CARRIER_AGENT";
 
@@ -63,7 +63,7 @@ export function DashboardShell({ nav, title, subtitle, headerAction }) {
   const switchTo = async (profile) => {
     try {
       await switchProfile(profile);
-      navigate(profile === "MERCHANT" ? "/merchant" : "/account");
+      navigate(profile === "MERCHANT" ? "/merchant" : profile === "ADMIN" || profile === "SUPER_ADMIN" ? "/admin" : "/account");
     } catch {
       toast.error("Impossible de changer de profil. Veuillez réessayer.");
     }
@@ -217,6 +217,16 @@ export function DashboardShell({ nav, title, subtitle, headerAction }) {
                 {user?.role === "CLIENT" && (user.profiles || []).includes("MERCHANT") && (
                   <DropdownMenuItem onClick={() => switchTo("MERCHANT")} data-testid="dash-switch-merchant">
                     <Store className="w-4 h-4 mr-2" /> Espace commerçant
+                  </DropdownMenuItem>
+                )}
+                {user?.role === "ADMIN" && (user.profiles || []).includes("MERCHANT") && (
+                  <DropdownMenuItem onClick={() => switchTo("MERCHANT")} data-testid="dash-switch-merchant">
+                    <Store className="w-4 h-4 mr-2" /> Espace commerçant
+                  </DropdownMenuItem>
+                )}
+                {user?.role === "MERCHANT" && (user.profiles || []).includes("ADMIN") && (
+                  <DropdownMenuItem onClick={() => switchTo("ADMIN")} data-testid="dash-switch-admin">
+                    <LayoutDashboard className="w-4 h-4 mr-2" /> Espace administrateur
                   </DropdownMenuItem>
                 )}
                 {user?.role === "MERCHANT" && (user.profiles || []).includes("CLIENT") && (

@@ -32,7 +32,7 @@ export function PublicHeader() {
   const switchTo = async (profile) => {
     try {
       await switchProfile(profile);
-      navigate(profile === "MERCHANT" ? "/merchant" : "/account");
+      navigate(profile === "MERCHANT" ? "/merchant" : profile === "ADMIN" || profile === "SUPER_ADMIN" ? "/admin" : "/account");
     } catch {
       toast.error("Impossible de changer de profil. Veuillez réessayer.");
     }
@@ -139,6 +139,16 @@ export function PublicHeader() {
                 {user.role === "CLIENT" && (user.profiles || []).includes("MERCHANT") && (
                   <DropdownMenuItem onClick={() => switchTo("MERCHANT")} data-testid="switch-to-merchant">
                     <Store className="w-4 h-4 mr-2" /> Espace commerçant
+                  </DropdownMenuItem>
+                )}
+                {user.role === "ADMIN" && (user.profiles || []).includes("MERCHANT") && (
+                  <DropdownMenuItem onClick={() => switchTo("MERCHANT")} data-testid="switch-to-merchant">
+                    <Store className="w-4 h-4 mr-2" /> Espace commerçant
+                  </DropdownMenuItem>
+                )}
+                {user.role === "MERCHANT" && (user.profiles || []).includes("ADMIN") && (
+                  <DropdownMenuItem onClick={() => switchTo("ADMIN")} data-testid="switch-to-admin">
+                    <LayoutDashboard className="w-4 h-4 mr-2" /> Espace administrateur
                   </DropdownMenuItem>
                 )}
                 {user.role === "MERCHANT" && (user.profiles || []).includes("CLIENT") && (

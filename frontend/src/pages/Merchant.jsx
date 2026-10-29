@@ -23,7 +23,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Home, Package, ShoppingCart, Users, Lightbulb, Boxes, BarChart3, Gift, Tag, Settings,
   Plus, Pencil, Trash2, Minus, TrendingUp, AlertTriangle, CheckCircle2, Clock, Phone, Mail, IdCard, Store, FileText,
-  Upload, X, Image as ImageIcon, Layers, UploadCloud, UserCog,
+  Upload, X, Image as ImageIcon, Layers, UploadCloud, UserCog, Link2,
 } from "lucide-react";
 import { CategoryPicker } from "@/components/CategoryPicker";
 
@@ -515,6 +515,193 @@ function ProductForm({ initial, onSaved, shop }) {
   );
 }
 
+function SupplierImportDraft({ item, importId, shop, onChanged }) {
+  const [form, setForm] = useState({
+    ...item,
+    gallery: item.gallery || [],
+    stock: item.stock || 0,
+    price_simple: item.price_simple || 0,
+    price_partner: item.price_partner || 0,
+    price_pro: item.price_pro || 0,
+    price_enterprise: item.price_enterprise || 0,
+    shipping_fee: item.shipping_fee || 0,
+  });
+  const [busy, setBusy] = useState(false);
+  const upd = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  const save = async () => {
+    setBusy(true);
+    try {
+      const payload = {
+        ...form,
+        gallery: form.gallery || [],
+        stock: Number(form.stock),
+        price_simple: Number(form.price_simple),
+        price_partner: Number(form.price_partner),
+        price_pro: Number(form.price_pro),
+        price_enterprise: Number(form.price_enterprise),
+        shipping_fee: Number(form.shipping_fee),
+      };
+      const { data } = await api.put(`/products/supplier-imports/${importId}/items/${item.id}`, payload);
+      setForm(data.item);
+      toast.success("Brouillon enregistré");
+      onChanged();
+      return true;
+    } catch (e) { toast.error(apiErr(e)); return false; }
+    finally { setBusy(false); }
+  };
+  const publish = async () => {
+    if (!await save()) return;
+    setBusy(true);
+    try {
+      await api.post(`/products/supplier-imports/${importId}/items/${item.id}/publish`);
+      toast.success("Produit envoyé en modération");
+      onChanged();
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+  const dismiss = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/products/supplier-imports/${importId}/items/${item.id}/dismiss`);
+      toast.success("Produit ignoré");
+      onChanged();
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+  if (item.status !== "PENDING") return null;
+  return (
+    <div className="border border-border rounded-xl p-4 space-y-3">
+      <div className="flex items-start gap-3">
+        <img src={form.image} alt="" className="w-20 h-20 rounded-lg object-cover bg-muted shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-muted-foreground">Prix fournisseur indicatif : {form.source_price ?? "—"} {form.source_currency}</div>
+          <a href={form.source_url} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline break-all">Voir la fiche source</a>
+          <Input className="mt-2" value={form.name} onChange={(e) => upd("name", e.target.value)} placeholder="Nom du produit" aria-label="Nom du produit" />
+        </div>
+      </div>
+      <Input value={form.image} onChange={(e) => upd("image", e.target.value)} placeholder="URL HTTPS de l’image principale" aria-label="Image principale" />
+      <Textarea value={(form.gallery || []).join("\n")} onChange={(e) => upd("gallery", e.target.value.split("\n").map((url) => url.trim()).filter(Boolean))} placeholder="Images supplémentaires — une URL HTTPS par ligne" aria-label="Galerie d’images" />
+      <Input value={form.short_description || ""} onChange={(e) => upd("short_description", e.target.value)} placeholder="Description courte" aria-label="Description courte" />
+      <Textarea value={form.description || ""} onChange={(e) => upd("description", e.target.value)} placeholder="Description détaillée" aria-label="Description détaillée" />
+      <CategoryPicker category={form.category || ""} subcategory={form.subcategory || ""} onChange={(category, subcategory) => setForm((current) => ({ ...current, category, subcategory }))} />
+      <div className="grid grid-cols-2 gap-3">
+        <div><Label>Stock</Label><Input type="number" min="1" value={form.stock} onChange={(e) => upd("stock", e.target.value)} /></div>
+        <div><Label>Transport ({shop?.currency})</Label><Input type="number" min="0" value={form.shipping_fee} onChange={(e) => upd("shipping_fee", e.target.value)} /></div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        {[
+          ["price_simple", "Prix client simple (PCS)"],
+          ["price_partner", "Prix partenaire (PP)"],
+          ["price_pro", "Prix professionnel (PPR)"],
+          ["price_enterprise", "Prix entreprise (PE)"],
+        ].map(([key, label]) => <div key={key}><Label>{label} ({shop?.currency})</Label><Input type="number" min="0" value={form[key]} onChange={(e) => upd(key, e.target.value)} /></div>)}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" className="rounded-full" disabled={busy} onClick={save}>Enregistrer</Button>
+        <Button className="rounded-full" disabled={busy} onClick={publish}>Valider et envoyer en modération</Button>
+        <Button variant="ghost" className="rounded-full text-destructive" disabled={busy} onClick={dismiss}>Ignorer</Button>
+      </div>
+    </div>
+  );
+}
+
+function SupplierImportDialog({ open, onOpenChange, shop, onPublished }) {
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [sessions, setSessions] = useState([]);
+  const [active, setActive] = useState(null);
+  const [items, setItems] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const refreshSessions = async () => {
+    try { const { data } = await api.get("/products/supplier-imports"); setSessions(data.sessions || []); }
+    catch (e) { toast.error(apiErr(e)); }
+  };
+  const openSession = async (id) => {
+    setBusy(true);
+    try {
+      const { data } = await api.get(`/products/supplier-imports/${id}`);
+      setActive(data.session);
+      setItems(data.items || []);
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { if (open) refreshSessions(); }, [open]);
+  const start = async () => {
+    setBusy(true);
+    try {
+      const { data } = await api.post("/products/supplier-imports", { source_url: sourceUrl });
+      setActive(data.session);
+      setItems(data.items || []);
+      await refreshSessions();
+      toast.success(`${data.items?.length || 0} produit(s) importé(s) dans les brouillons`);
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+  const continueImport = async () => {
+    if (!active) return;
+    setBusy(true);
+    try {
+      const { data } = await api.post(`/products/supplier-imports/${active.id}/continue`);
+      setActive(data.session);
+      setItems(data.items || []);
+      await refreshSessions();
+      toast.success(`${data.session.imported_count} produit(s) détecté(s) au total`);
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+  const pause = async () => {
+    if (!active) return;
+    setBusy(true);
+    try {
+      const { data } = await api.post(`/products/supplier-imports/${active.id}/pause`);
+      setActive(data.session);
+      await refreshSessions();
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+  const reloadActive = async () => {
+    if (!active) return;
+    await openSession(active.id);
+    onPublished();
+    await refreshSessions();
+  };
+  const pendingItems = items.filter((item) => item.status === "PENDING");
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Importer depuis AliExpress ou Alibaba</DialogTitle>
+          <DialogDescription>Collez une URL publique de produit ou de boutique. Les boutiques sont traitées par lots de 20 maximum. Les pages protégées ne sont pas contournées. Chaque prix et frais de transport doit être défini par vous avant l’envoi en modération.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <Input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="https://www.aliexpress.com/... ou alibaba.com/..." aria-label="Adresse AliExpress ou Alibaba" />
+            <Button className="rounded-full shrink-0" disabled={busy || !sourceUrl.trim()} onClick={start}><Link2 className="w-4 h-4 mr-1" /> Importer</Button>
+          </div>
+          {sessions.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {sessions.map((session) => <Button key={session.id} variant={active?.id === session.id ? "default" : "outline"} size="sm" className="rounded-full" disabled={busy} onClick={() => openSession(session.id)}>{session.shop_name} · {session.imported_count} importé(s) · {session.status}</Button>)}
+            </div>
+          )}
+          {active && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border border-border rounded-lg p-3">
+                <div className="text-sm"><strong>{active.kind === "STORE" ? "Boutique" : "Produit"}</strong> · {active.imported_count} produit(s) détecté(s) · {pendingItems.length} à vérifier</div>
+                <div className="flex gap-2">
+                  {active.can_continue && <Button variant="outline" className="rounded-full" disabled={busy} onClick={pause}>Arrêter ici</Button>}
+                  {active.can_continue && <Button className="rounded-full" disabled={busy} onClick={continueImport}>Continuer (20 max)</Button>}
+                </div>
+              </div>
+              {active.errors?.length > 0 && <div className="text-sm text-amber-700">{active.errors.length} page(s) fournisseur illisible(s) ou indisponible(s).</div>}
+              {pendingItems.length === 0 && <p className="text-sm text-muted-foreground">Aucun brouillon à vérifier pour ce lot.</p>}
+              {pendingItems.map((item) => <SupplierImportDraft key={item.id} item={item} importId={active.id} shop={shop} onChanged={reloadActive} />)}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function MerchantProducts() {
   const { shop } = useMerchant();
   const [products, setProducts] = useState(null);
@@ -522,6 +709,7 @@ export function MerchantProducts() {
   const [editing, setEditing] = useState(null);
   const [csvEnabled, setCsvEnabled] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [supplierImportOpen, setSupplierImportOpen] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [importBusy, setImportBusy] = useState(false);
   const load = () => api.get("/products/mine").then((r) => setProducts(r.data.products)).catch(() => setProducts([]));
@@ -548,10 +736,12 @@ export function MerchantProducts() {
       <PageHeader title="Articles" subtitle={`${products.length} article(s)`}
         action={
           <div className="flex gap-2">
+            <Button variant="outline" className="rounded-full" onClick={() => setSupplierImportOpen(true)} data-testid="supplier-import-btn"><Link2 className="w-4 h-4 mr-1" /> AliExpress / Alibaba</Button>
             {csvEnabled && <Button variant="outline" className="rounded-full" onClick={() => { setImportResult(null); setImportOpen(true); }} data-testid="import-csv-btn"><UploadCloud className="w-4 h-4 mr-1" /> Importer CSV</Button>}
             <Button className="rounded-full" onClick={openNew} data-testid="new-product-btn"><Plus className="w-4 h-4 mr-1" /> Nouvel article</Button>
           </div>
         } />
+      <SupplierImportDialog open={supplierImportOpen} onOpenChange={setSupplierImportOpen} shop={shop} onPublished={load} />
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader><DialogTitle>{editing ? "Modifier l'article" : "Nouvel article"}</DialogTitle>

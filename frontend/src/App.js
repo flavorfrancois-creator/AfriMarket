@@ -22,7 +22,7 @@ import {
   MerchantOpportunities, MerchantSettings, MerchantDailyOffers,
 } from "@/pages/Merchant";
 import {
-  AdminLayout, AdminOverview, AdminShops, AdminUsers, AdminWithdrawals, AdminOrders,
+  AdminLayout, AdminOverview, AdminShops, AdminMyShopRequest, AdminUsers, AdminWithdrawals, AdminOrders,
   AdminAudit, AdminCountries, AdminStaff, AdminSecurity, AdminApprovals, AdminLoginJournal,
   AdminProducts, AdminReports, AdminPayouts, AdminCarriers, AdminReporting, AdminGlobalSettings, AdminEarnings,
 } from "@/pages/Admin";
@@ -110,6 +110,9 @@ function App() {
                 <Route path="/admin" element={<AdminLayout />}>
                   <Route index element={<AdminOverview />} />
                   <Route path="shops" element={<AdminShops />} />
+                  <Route element={<ProtectedRoute roles={["ADMIN"]} />}>
+                    <Route path="my-shop-request" element={<AdminMyShopRequest />} />
+                  </Route>
                   <Route path="products" element={<AdminProducts />} />
                   <Route path="reports" element={<AdminReports />} />
                   <Route path="users" element={<AdminUsers />} />

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CrossBorderSettings } from "@/components/CrossBorderSettings";
 import { AdminCountryApis } from "@/components/AdminCountryApis";
@@ -52,6 +52,7 @@ export function AdminLayout() {
   const allNav = [
     { to: "/admin", label: t("dashboard"), icon: Home, testid: "overview", show: can("overview") },
     { to: "/admin/shops", label: t("shops"), icon: Store, testid: "shops", show: can("shops") },
+    { to: "/admin/my-shop-request", label: "Demander une boutique", icon: Store, testid: "my-shop-request", show: user?.role === "ADMIN" },
     { to: "/admin/products", label: "Modération produits", icon: Package, testid: "products", show: can("products") },
     { to: "/admin/categories", label: "Catégories", icon: FolderTree, testid: "categories", show: can("products") },
     { to: "/admin/reports", label: "Signalements", icon: ShieldAlert, testid: "reports", show: can("moderation") },
@@ -318,7 +319,101 @@ export function AdminReporting() {
   );
 }
 
+export function AdminMyShopRequest() {
+  const { user, switchProfile } = useAuth();
+  const navigate = useNavigate();
+  const [request, setRequest] = useState(undefined);
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const load = () => api.get("/admin/my-merchant-access-request")
+    .then((r) => setRequest(r.data.request))
+    .catch((e) => { toast.error(apiErr(e)); setRequest(null); });
+  useEffect(() => { load(); }, []);
+  const authorized = (user?.profiles || [user?.role]).includes("MERCHANT") || request?.status === "APPROVED";
+  const submit = async () => {
+    try {
+      const { data } = await api.post("/admin/my-merchant-access-request", { accept_terms: acceptTerms });
+      setRequest(data.request);
+      toast.success("Demande envoyée au super-administrateur");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const enterMerchantSpace = async () => {
+    try {
+      await switchProfile("MERCHANT");
+      navigate("/merchant/onboarding");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  if (request === undefined) return <Loading />;
+  return (
+    <div className="max-w-3xl">
+      <PageHeader title="Demander l’autorisation d’ouvrir une boutique"
+        subtitle="L’accès commerçant d’un administrateur doit être autorisé par le super-administrateur." />
+      {["PENDING", "REVIEWING"].includes(request?.status) ? (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-5 space-y-2">
+          <div className="font-semibold">Demande en attente</div>
+          <p className="text-sm">Le super-administrateur doit autoriser votre profil commerçant avant que vous puissiez créer une boutique.</p>
+        </div>
+      ) : authorized ? (
+        <div className="rounded-xl border border-green-300 bg-green-50 p-5 space-y-3">
+          <div className="font-semibold text-green-800">Accès commerçant autorisé</div>
+          <p className="text-sm">Vous pouvez maintenant créer votre boutique. Elle devra ensuite être approuvée par le super-administrateur avant d’être publiée.</p>
+          <Button className="rounded-full" onClick={enterMerchantSpace}>Accéder à la création de boutique</Button>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+          {request?.status === "REJECTED" && (
+            <div className="text-sm text-destructive">Demande précédente refusée.{request.reason ? ` Motif : ${request.reason}` : ""} Vous pouvez soumettre une nouvelle demande.</div>
+          )}
+          <p className="text-sm text-muted-foreground">Après autorisation, vous devrez suivre les étapes de vérification et soumettre votre boutique à l’approbation du super-administrateur.</p>
+          <label className="flex items-start gap-2 text-sm">
+            <Checkbox checked={acceptTerms} onCheckedChange={setAcceptTerms} />
+            <span>J’accepte les <a href="/terms/merchant" target="_blank" rel="noreferrer" className="text-primary underline">conditions commerçant</a>.</span>
+          </label>
+          <Button className="rounded-full" disabled={!acceptTerms} onClick={submit}>Envoyer la demande d’autorisation</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MerchantAccessRequests() {
+  const { user } = useAuth();
+  const [requests, setRequests] = useState(null);
+  const load = () => api.get("/admin/merchant-access-requests")
+    .then((r) => setRequests(r.data.requests || []))
+    .catch((e) => { toast.error(apiErr(e)); setRequests([]); });
+  useEffect(() => { if (user?.role === "SUPER_ADMIN") load(); }, [user?.role]);
+  if (user?.role !== "SUPER_ADMIN" || requests === null) return null;
+  const decide = async (item, decision) => {
+    try {
+      const action = decision === "APPROVE" ? "approve" : "reject";
+      await api.put(`/admin/merchant-access-requests/${item.id}/${action}`,
+        decision === "APPROVE" ? {} : { reason: "Demande non approuvée par le super-administrateur." });
+      toast.success(decision === "APPROVE" ? "Accès commerçant autorisé" : "Demande refusée");
+      load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  return (
+    <section className="mb-6 rounded-xl border border-border bg-card p-4">
+      <h2 className="font-semibold mb-3">Demandes d’accès commerçant des administrateurs</h2>
+      {requests.length === 0 ? <p className="text-sm text-muted-foreground">Aucune demande en attente.</p> : (
+        <div className="space-y-3">
+          {requests.map((item) => (
+            <div key={item.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-border rounded-lg p-3">
+              <div className="text-sm"><div className="font-medium">{item.name}</div><div className="text-muted-foreground">{item.email}</div></div>
+              <div className="flex gap-2">
+                <Button size="sm" className="rounded-full" onClick={() => decide(item, "APPROVE")}>Autoriser</Button>
+                <Button size="sm" variant="outline" className="rounded-full" onClick={() => decide(item, "REJECT")}>Refuser</Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function AdminShops() {
+  const { user } = useAuth();
   const [shops, setShops] = useState(null);
   const [tab, setTab] = useState("SUBMITTED");
   const [detail, setDetail] = useState(null);
@@ -358,6 +453,7 @@ export function AdminShops() {
   return (
     <div>
       <PageHeader title="Boutiques" subtitle="Validation, suspension, commissions & quotas" />
+      <MerchantAccessRequests />
       <Tabs value={tab} onValueChange={setTab} className="mb-4">
         <TabsList>
           <TabsTrigger value="SUBMITTED" data-testid="tab-pending">En attente</TabsTrigger>
@@ -458,10 +554,14 @@ export function AdminShops() {
             </div>
           )}
           {detail && ["SUBMITTED", "UNDER_REVIEW"].includes(detail.shop.status) && (
-            <DialogFooter className="gap-2">
-              <Button variant="outline" className="rounded-full text-destructive" onClick={() => setRejectOpen(true)} data-testid="reject-shop"><XCircle className="w-4 h-4 mr-1" /> Rejeter</Button>
-              <Button className="rounded-full" onClick={() => approve(detail.shop.id)} data-testid="approve-shop"><CheckCircle2 className="w-4 h-4 mr-1" /> Approuver</Button>
-            </DialogFooter>
+            detail.shop.owner_role === "ADMIN" && user?.role !== "SUPER_ADMIN" ? (
+              <p className="text-sm text-amber-700">Seul le super-administrateur peut statuer sur la boutique d’un administrateur.</p>
+            ) : (
+              <DialogFooter className="gap-2">
+                <Button variant="outline" className="rounded-full text-destructive" onClick={() => setRejectOpen(true)} data-testid="reject-shop"><XCircle className="w-4 h-4 mr-1" /> Rejeter</Button>
+                <Button className="rounded-full" onClick={() => approve(detail.shop.id)} data-testid="approve-shop"><CheckCircle2 className="w-4 h-4 mr-1" /> Approuver</Button>
+              </DialogFooter>
+            )
           )}
         </DialogContent>
       </Dialog>
