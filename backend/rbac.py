@@ -134,6 +134,7 @@ DEFAULT_SETTINGS = {
     "fraud_customer_cancels": 3,         # cancelled/rejected orders per customer to flag
     "fraud_refund_count": 3,             # refunded/partial-refund orders in period to flag
     "taxes_enabled": False,              # Module 7: global tax display toggle (no total impact)
+    "kyc_enabled": True,                # Require identity verification for merchant accounts
     "legal_content": {},                 # Module 7: editable legal pages {kind: {title, body}}
     "csv_import_enabled": False,          # P1: allow merchants to bulk import products via CSV/XLSX
     "customs_enabled": True,

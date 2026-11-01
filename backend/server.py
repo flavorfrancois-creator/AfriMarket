@@ -22,7 +22,7 @@ from pymongo import ReturnDocument
 from db import db, client, now_iso, new_id, gen_invite_code, gen_order_ref, gen_sku, gen_tracking, serialize, oid
 from security import (hash_password, verify_password, create_access_token, get_current_user,
                       require_roles)
-from emailer import send_verification_email, send_password_reset_email, send_2fa_code
+from emailer import send_email, send_verification_email, send_password_reset_email, send_2fa_code
 from messaging import send_message, send_to_users, send_sms_like
 import messaging
 from config_data import COUNTRIES, CURRENCIES, currency_for_country
@@ -124,6 +124,7 @@ class SettingsReq(BaseModel):
     fraud_refund_count: Optional[int] = None
     legal_content: Optional[dict] = None
     taxes_enabled: Optional[bool] = None
+    kyc_enabled: Optional[bool] = None
     csv_import_enabled: Optional[bool] = None
     customs_enabled: Optional[bool] = None
     intl_shipping_currency: Optional[str] = None
@@ -405,18 +406,19 @@ def _client_ip(request: Request) -> str:
 
 
 def _user_public(user: dict) -> dict:
+    profiles = user.get("profiles") or [user.get("role")]
     return {
         "id": str(user["_id"]) if "_id" in user else user.get("id"),
         "name": user.get("name"),
         "email": user.get("email"),
         "phone": user.get("phone", ""),
         "role": user.get("role"),
-        "profiles": user.get("profiles") or [user.get("role")],
+        "profiles": profiles,
         "country": user.get("country", ""),
         "currency": user.get("currency") or (currency_for_country(user["country"])["code"] if user.get("country") else ""),
         "phone_verified": user.get("phone_verified", False),
         "email_verified": user.get("email_verified", False),
-        "kyc_status": user.get("kyc_status", "NONE"),
+        "kyc_status": user.get("kyc_status", "NONE") if "MERCHANT" in profiles else "NONE",
         "invite_code": user.get("invite_code"),
         "referred_by": user.get("referred_by"),
         "is_partner": user.get("is_partner", False),
@@ -503,48 +505,18 @@ async def _deliver_otp(user: dict, channel: str, code: str):
 
 
 # ---------------- Auth ----------------
-async def _register_partner(req: RegisterReq, email: str, role: str) -> dict:
-    """Relay managers / carrier agents self-register as PENDING; no token until admin approval."""
-    if len(req.password or "") < 6:
-        raise HTTPException(status_code=400, detail="Mot de passe trop court (6 caractères minimum)")
-    proposed = None
-    if role == "RELAY_MANAGER" and not req.relay_point_id:
-        p = req.proposed_relay or {}
-        if not (p.get("name") or "").strip() or not (p.get("city") or "").strip():
-            raise HTTPException(status_code=400, detail="Choisissez un point relais ou décrivez le vôtre (nom, ville)")
-        proposed = {k: str(p.get(k) or "").strip()[:200] for k in ("name", "city", "address")}
-        proposed["country"] = req.country or ""
-    if role == "CARRIER_AGENT" and not req.carrier_id:
-        raise HTTPException(status_code=400, detail="Choisissez votre transporteur")
-    doc = {"name": req.name.strip(), "email": email, "password_hash": hash_password(req.password),
-           "phone": req.phone or "", "role": role, "country": req.country or "", "status": "PENDING",
-           "relay_point_id": req.relay_point_id if role == "RELAY_MANAGER" else None,
-           "carrier_id": req.carrier_id if role == "CARRIER_AGENT" else None,
-           "proposed_relay": proposed, "relay_edit_mode": "NONE", "token_version": 0, "created_at": now_iso(),
-           "language": req.language if req.language in messaging.LANGS else "fr"}
-    res = await db.users.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    await accounts.check_restore(doc)
-    for admin in await db.users.find({"role": {"$in": ["SUPER_ADMIN", "ADMIN"]}}, {"_id": 1}).to_list(50):
-        await notify(str(admin["_id"]), "PARTNER_SIGNUP", "Nouveau partenaire logistique",
-                     f"{doc['name']} ({role}) attend une validation.", "/admin/logistics")
-    return {"pending": True, "user_id": str(res.inserted_id),
-            "message": "Inscription envoyée. Votre compte sera actif après validation par l'administrateur."}
-
-
 @api.post("/auth/register")
 async def register(req: RegisterReq, background_tasks: BackgroundTasks):
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Cet e-mail est déjà utilisé")
     role = req.role.upper()
-    if role not in ("CLIENT", "MERCHANT", "RELAY_MANAGER", "CARRIER_AGENT"):
+    if role in logistics.PARTNER_ROLES:
+        raise HTTPException(status_code=403, detail="Les comptes points relais et transporteurs sont créés uniquement sur invitation d’un administrateur.")
+    if role not in ("CLIENT", "MERCHANT"):
         role = "CLIENT"
     if role == "MERCHANT" and not req.merchant_terms_accepted:
         raise HTTPException(status_code=400, detail="L’acceptation des conditions commerçant est obligatoire.")
-    if role in logistics.PARTNER_ROLES:
-        return await _register_partner(req, email, role)
-
     referred_by = None
     if req.invite_code:
         sponsor = await db.users.find_one({"invite_code": req.invite_code.strip()})
@@ -1151,6 +1123,9 @@ def _mb(bytes_: int) -> float:
 async def create_shop(req: ShopReq, user: dict = Depends(require_roles("MERCHANT"))):
     if not req.name.strip() or not req.country.strip() or not req.city.strip():
         raise HTTPException(status_code=400, detail="Le nom de la boutique, le pays et la ville sont obligatoires.")
+    settings = await get_settings()
+    if settings.get("kyc_enabled", True) and not await db.merchant_verifications.find_one({"user_id": user["id"]}):
+        raise HTTPException(status_code=403, detail="Soumettez votre vérification KYC avant de créer une boutique.")
     cur = currency_for_country(req.country)
     doc = {
         "id": new_id(),
@@ -1290,6 +1265,9 @@ async def get_shop(shop_id: str):
 # ---------------- KYC ----------------
 @api.post("/kyc")
 async def submit_kyc(req: KycReq, user: dict = Depends(require_roles("MERCHANT"))):
+    settings = await get_settings()
+    if not settings.get("kyc_enabled", True):
+        raise HTTPException(status_code=403, detail="La vérification KYC est désactivée par l’administration.")
     doc = {
         "id": new_id(), "user_id": user["id"], "user_name": user["name"],
         **req.model_dump(), "status": "EN_ATTENTE", "created_at": now_iso(),
@@ -1302,12 +1280,16 @@ async def submit_kyc(req: KycReq, user: dict = Depends(require_roles("MERCHANT")
 
 @api.get("/kyc/mine")
 async def my_kyc(user: dict = Depends(require_roles("MERCHANT"))):
+    profiles = user.get("profiles") or [user.get("role")]
+    if "MERCHANT" not in profiles:
+        raise HTTPException(status_code=403, detail="La vérification KYC est réservée aux comptes commerçants.")
+    settings = await get_settings()
     kyc = await db.merchant_verifications.find_one({"user_id": user["id"]})
     if kyc:
         k = serialize(kyc)
         k.pop("file_data", None)
-        return {"kyc": k}
-    return {"kyc": None}
+        return {"kyc": k, "enabled": bool(settings.get("kyc_enabled", True))}
+    return {"kyc": None, "enabled": bool(settings.get("kyc_enabled", True))}
 
 
 # ---------------- Products ----------------
@@ -3396,7 +3378,9 @@ async def admin_shops(status: Optional[str] = None, user: dict = Depends(require
     shops = await db.shops.find(query).sort("created_at", -1).to_list(500)
     result = []
     for s in shops:
-        kyc = await db.merchant_verifications.find_one({"user_id": s["owner_id"]})
+        owner = await db.users.find_one({"_id": oid(s["owner_id"])}, {"profiles": 1, "role": 1})
+        owner_profiles = (owner.get("profiles") or [owner.get("role")]) if owner else []
+        kyc = await db.merchant_verifications.find_one({"user_id": s["owner_id"]}) if "MERCHANT" in owner_profiles else None
         item = serialize(s)
         item["kyc_status"] = kyc["status"] if kyc else "NONE"
         item["product_count"] = await db.products.count_documents({"shop_id": s["id"], "status": {"$ne": "DELETED"}})
@@ -3551,8 +3535,9 @@ async def set_shop_quota(shop_id: str, req: ShopQuotaReq, request: Request, user
 @api.get("/admin/shops/{shop_id}")
 async def admin_shop_detail(shop_id: str, user: dict = Depends(require_module("shops"))):
     shop = await _shop_or_404(shop_id)
-    owner = await db.users.find_one({"_id": ObjectId(shop["owner_id"])}, {"role": 1})
-    kyc = await db.merchant_verifications.find_one({"user_id": shop["owner_id"]})
+    owner = await db.users.find_one({"_id": ObjectId(shop["owner_id"])}, {"role": 1, "profiles": 1})
+    owner_profiles = (owner.get("profiles") or [owner.get("role")]) if owner else []
+    kyc = await db.merchant_verifications.find_one({"user_id": shop["owner_id"]}) if "MERCHANT" in owner_profiles else None
     kyc_out = serialize(kyc) if kyc else None
     shop_out = serialize(shop)
     shop_out["owner_role"] = owner.get("role") if owner else None
@@ -3594,6 +3579,9 @@ async def reject_shop(shop_id: str, payload: dict, request: Request, user: dict 
 
 @api.put("/admin/kyc/{user_id}")
 async def admin_verify_kyc(user_id: str, payload: dict, user: dict = Depends(require_module("shops"))):
+    target = await db.users.find_one({"_id": oid(user_id)})
+    if not target or "MERCHANT" not in (target.get("profiles") or [target.get("role")]):
+        raise HTTPException(status_code=404, detail="Compte commerçant introuvable")
     status = payload.get("status", "APPROUVE")
     if status not in ["EN_ATTENTE", "EN_VERIFICATION", "APPROUVE", "REJETE", "DOCUMENT_EXPIRE"]:
         raise HTTPException(status_code=400, detail="Statut invalide")
@@ -3606,6 +3594,9 @@ async def admin_verify_kyc(user_id: str, payload: dict, user: dict = Depends(req
 
 @api.get("/admin/kyc/{user_id}/document")
 async def admin_kyc_document(user_id: str, user: dict = Depends(require_module("shops"))):
+    target = await db.users.find_one({"_id": oid(user_id)})
+    if not target or "MERCHANT" not in (target.get("profiles") or [target.get("role")]):
+        raise HTTPException(status_code=404, detail="Compte commerçant introuvable")
     kyc = await db.merchant_verifications.find_one({"user_id": user_id})
     if not kyc:
         raise HTTPException(status_code=404, detail="Document introuvable")
@@ -4206,6 +4197,10 @@ async def admin_put_settings(req: SettingsReq, request: Request, user: dict = De
         upd["fraud_refund_count"] = max(1, int(req.fraud_refund_count))
     if req.taxes_enabled is not None:
         upd["taxes_enabled"] = bool(req.taxes_enabled)
+    if req.kyc_enabled is not None:
+        if user.get("role") != "SUPER_ADMIN":
+            raise HTTPException(status_code=403, detail="Seul le super-administrateur peut modifier l’obligation KYC.")
+        upd["kyc_enabled"] = bool(req.kyc_enabled)
     if req.csv_import_enabled is not None:
         upd["csv_import_enabled"] = bool(req.csv_import_enabled)
     if req.customs_enabled is not None:

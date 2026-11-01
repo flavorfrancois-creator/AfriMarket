@@ -96,13 +96,14 @@ export function MerchantOnboarding() {
   const [shop, setShop] = useState(undefined);
   const [shops, setShops] = useState([]);
   const [kyc, setKyc] = useState(null);
+  const [kycEnabled, setKycEnabled] = useState(true);
   const [countries, setCountries] = useState([]);
   const [searchParams] = useSearchParams();
   const [addingShop, setAddingShop] = useState(searchParams.get("new") === "1");
 
   const load = () => {
     api.get("/shops/mine").then((r) => { setShop(r.data.shop); setShops(r.data.shops || []); }).catch(() => setShop(null));
-    api.get("/kyc/mine").then((r) => setKyc(r.data.kyc)).catch(() => {});
+    api.get("/kyc/mine").then((r) => { setKyc(r.data.kyc); setKycEnabled(r.data.enabled !== false); }).catch(() => {});
   };
   useEffect(() => {
     load();
@@ -123,8 +124,8 @@ export function MerchantOnboarding() {
 
   const phoneOk = user?.phone_verified;
   const emailOk = user?.email_verified;
-  const kycOk = kyc && (kyc.status === "APPROUVE");
-  const kycSubmitted = kyc && kyc.status !== "NONE";
+  const kycOk = !kycEnabled || (kyc && kyc.status === "APPROUVE");
+  const kycSubmitted = !kycEnabled || (kyc && kyc.status !== "NONE");
   const shopCreated = !!shop;
   const shopSubmitted = shop && ["SUBMITTED", "UNDER_REVIEW", "APPROVED", "REJECTED"].includes(shop.status);
 
@@ -166,7 +167,8 @@ export function MerchantOnboarding() {
         <VerifyStep StepC={Step} kind="email" ok={emailOk} onDone={refresh} />
 
         <Step n={3} title="Vérification d'identité (KYC)" done={kycOk}>
-          {kycOk ? <div className="text-sm text-green-700">Identité approuvée ✓</div> :
+          {!kycEnabled ? <div className="text-sm text-muted-foreground">La vérification KYC n’est pas requise actuellement.</div> :
+            kycOk ? <div className="text-sm text-green-700">Identité approuvée ✓</div> :
             kycSubmitted ? <div className="text-sm"><StatusBadge status={kyc.status} /> — en cours de vérification par l'administration.</div> :
             <KycForm countries={countries} onDone={load} disabled={!phoneOk || !emailOk} />}
         </Step>

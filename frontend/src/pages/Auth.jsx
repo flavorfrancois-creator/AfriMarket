@@ -170,8 +170,6 @@ export function Register() {
   const [acceptedMerchantTerms, setAcceptedMerchantTerms] = useState(false);
   const [activatingMerchant, setActivatingMerchant] = useState(false);
   const [pendingMsg, setPendingMsg] = useState("");
-  const [partner, setPartner] = useState({ relay_point_id: "", carrier_id: "", name: "", city: "", address: "" });
-  const isPartner = form.role === "RELAY_MANAGER" || form.role === "CARRIER_AGENT";
   const isMerchantProfileFlow = !!user && form.role === "MERCHANT";
 
   useEffect(() => {
@@ -197,9 +195,6 @@ export function Register() {
         name: form.name, email: form.email, phone: form.phone ? `${selectedCountry.phone_code}${form.phone}` : "", password: form.password,
         role: form.role, country: form.country, invite_code: form.role === "MERCHANT" ? null : form.invite_code || null,
         merchant_terms_accepted: form.role === "MERCHANT" && acceptedMerchantTerms, language: lang,
-        ...(form.role === "RELAY_MANAGER" ? (partner.relay_point_id ? { relay_point_id: partner.relay_point_id }
-          : { proposed_relay: { name: partner.name, city: partner.city, address: partner.address } }) : {}),
-        ...(form.role === "CARRIER_AGENT" ? { carrier_id: partner.carrier_id } : {}),
       });
       if (data.pending) { setPendingMsg(data.message); return; }
       login(data.token, data.user);
@@ -291,8 +286,8 @@ export function Register() {
 
   return (
     <AuthShell title={t("register")} sub="Rejoignez la plateforme en quelques secondes">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 mb-5 bg-muted p-1 rounded-2xl">
-        {[["CLIENT", "Client"], ["MERCHANT", "Commerçant"], ["RELAY_MANAGER", "Point relais"], ["CARRIER_AGENT", "Transporteur"]].map(([v, l]) => (
+      <div className="grid grid-cols-2 gap-1 mb-5 bg-muted p-1 rounded-2xl">
+        {[["CLIENT", "Client"], ["MERCHANT", "Commerçant"]].map(([v, l]) => (
           <button key={v} type="button" onClick={() => upd("role", v)} data-testid={`role-${v}`}
             className={`py-2 rounded-full text-sm font-medium transition-colors ${form.role === v ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
             {l}
@@ -333,7 +328,6 @@ export function Register() {
             </div>
           </div>
         </div>
-        {isPartner && <PartnerFields role={form.role} country={form.country} partner={partner} setPartner={setPartner} />}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <Label>{t("password")}</Label>
@@ -344,7 +338,7 @@ export function Register() {
             <Input type="password" value={form.confirm} onChange={(e) => upd("confirm", e.target.value)} required data-testid="reg-confirm" className="mt-1" />
           </div>
         </div>
-        {!isPartner && form.role !== "MERCHANT" && <div>
+        {form.role !== "MERCHANT" && <div>
           <Label>Code d'invitation (optionnel)</Label>
           <Input value={form.invite_code} onChange={(e) => upd("invite_code", e.target.value)} placeholder="INVITE-XXXXXX" data-testid="reg-invite" className="mt-1" />
         </div>}
@@ -376,44 +370,85 @@ export function Register() {
   );
 }
 
-function PartnerFields({ role, country, partner, setPartner }) {
-  const [points, setPoints] = useState([]);
-  const [carriers, setCarriers] = useState([]);
+export function CompletePartnerInvitation() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get("token") || "";
+  const [invitation, setInvitation] = useState(null);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+
   useEffect(() => {
-    if (role === "RELAY_MANAGER") api.get("/relay-points", { params: country ? { country } : {} }).then((r) => setPoints(r.data.relay_points)).catch(() => {});
-    else api.get("/logistics/carriers").then((r) => setCarriers(r.data.carriers)).catch(() => {});
-  }, [role, country]);
-  const set = (k, v) => setPartner((p) => ({ ...p, [k]: v }));
-  if (role === "CARRIER_AGENT") {
-    return (
-      <div data-testid="reg-carrier-fields">
-        <Label>Votre transporteur</Label>
-        <Select value={partner.carrier_id} onValueChange={(v) => set("carrier_id", v)}>
-          <SelectTrigger className="mt-1" data-testid="reg-carrier"><SelectValue placeholder="Choisir" /></SelectTrigger>
-          <SelectContent>{carriers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
-        </Select>
-      </div>
-    );
-  }
+    if (!token) {
+      setError("Lien d’invitation invalide ou incomplet.");
+      setLoading(false);
+      return;
+    }
+    api.get(`/logistics/invitations/${encodeURIComponent(token)}`)
+      .then((r) => setInvitation(r.data.invitation))
+      .catch((e) => setError(apiErr(e)))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setError("");
+    if (password !== confirm) {
+      setError("Les mots de passe ne correspondent pas.");
+      return;
+    }
+    if (!acceptTerms) {
+      setError("Veuillez accepter les conditions d’utilisation.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { data } = await api.post("/logistics/invitations/complete", {
+        token, name, phone, password, accept_terms: acceptTerms,
+      });
+      login(data.token, data.account);
+      toast.success("Votre compte partenaire est créé.");
+      navigate("/partner", { replace: true });
+    } catch (e) { setError(apiErr(e)); }
+    finally { setBusy(false); }
+  };
+
   return (
-    <div className="space-y-2 border border-border rounded-lg p-3" data-testid="reg-relay-fields">
-      <Label>Votre point relais</Label>
-      <Select value={partner.relay_point_id || "NEW"} onValueChange={(v) => set("relay_point_id", v === "NEW" ? "" : v)}>
-        <SelectTrigger data-testid="reg-relay-point"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="NEW">Nouveau point relais (à créer)</SelectItem>
-          {points.map((p) => <SelectItem key={p.id} value={p.id}>{p.name} — {p.city}</SelectItem>)}
-        </SelectContent>
-      </Select>
-      {!partner.relay_point_id && (
-        <div className="grid grid-cols-2 gap-2">
-          <Input placeholder="Nom du point relais" value={partner.name} onChange={(e) => set("name", e.target.value)} data-testid="reg-relay-name" />
-          <Input placeholder="Ville" value={partner.city} onChange={(e) => set("city", e.target.value)} data-testid="reg-relay-city" />
-          <Input className="col-span-2" placeholder="Adresse" value={partner.address} onChange={(e) => set("address", e.target.value)} data-testid="reg-relay-address" />
+    <AuthShell title="Terminer la création de votre compte" sub="Invitation AfriMarket — espace logistique">
+      {loading ? <div className="text-sm text-muted-foreground">Vérification du lien…</div> : invitation ? (
+        <form onSubmit={submit} className="space-y-3">
+          <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+            <div>Adresse e-mail : <strong>{invitation.email}</strong></div>
+            <div>Compte : <strong>{invitation.role === "RELAY_MANAGER" ? "Point relais" : "Transporteur"}</strong></div>
+            <div>Pays : <strong>{invitation.country}</strong></div>
+          </div>
+          <div><Label>Nom complet</Label><Input value={name} onChange={(e) => setName(e.target.value)} required minLength={2} maxLength={120} className="mt-1" data-testid="partner-invite-name" /></div>
+          <div><Label>Téléphone (facultatif)</Label><Input value={phone} onChange={(e) => setPhone(e.target.value)} autoComplete="tel" className="mt-1" data-testid="partner-invite-phone" /></div>
+          <div><Label>Mot de passe (8 caractères minimum)</Label><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" className="mt-1" data-testid="partner-invite-password" /></div>
+          <div><Label>Confirmer le mot de passe</Label><Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" className="mt-1" data-testid="partner-invite-confirm" /></div>
+          <label className="flex items-start gap-2 text-sm leading-relaxed">
+            <input type="checkbox" checked={acceptTerms} onChange={(e) => setAcceptTerms(e.target.checked)} required className="mt-1 accent-primary" data-testid="partner-invite-terms" />
+            <span>J’accepte les <Link to="/terms" target="_blank" rel="noreferrer" className="text-primary underline">conditions générales d’utilisation</Link>.</span>
+          </label>
+          {error && <div className="text-sm text-destructive" role="alert">{error}</div>}
+          <Button type="submit" className="w-full rounded-full h-11" disabled={busy || !acceptTerms} data-testid="partner-invite-complete">
+            {busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Créer mon compte
+          </Button>
+        </form>
+      ) : (
+        <div className="space-y-3">
+          <div className="text-sm text-destructive" role="alert">{error || "Ce lien d’invitation n’est plus valide."}</div>
+          <Link to="/login" className="block text-center text-primary text-sm">Retour à la connexion</Link>
         </div>
       )}
-      <p className="text-xs text-muted-foreground">Votre compte sera actif après validation par l'administrateur.</p>
-    </div>
+    </AuthShell>
   );
 }
 

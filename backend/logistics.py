@@ -1,20 +1,24 @@
 """Route tracking: relay points, partner accounts (relay managers / carriers), parcel scan events, local couriers."""
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
+import secrets
 from datetime import datetime, timezone, timedelta
+from html import escape
 from typing import Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from db import db, new_id, now_iso
-from security import get_current_user, hash_password
+from security import get_current_user, hash_password, create_access_token
+from emailer import send_email
 from business import audit_log
 from messaging import send_message, send_to_users
-from rbac import require_module, get_settings
+from rbac import require_module, require_admin_level, get_settings
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger("logistics")
@@ -57,6 +61,23 @@ class PartnerAccountReq(BaseModel):
     relay_edit_mode: Optional[str] = None
     status: Optional[str] = None
     create_proposed_point: bool = False
+
+
+class PartnerInviteReq(BaseModel):
+    email: EmailStr
+    role: str
+    country: str
+    relay_point_id: Optional[str] = None
+    carrier_id: Optional[str] = None
+    relay_edit_mode: str = "NONE"
+
+
+class PartnerInviteCompleteReq(BaseModel):
+    token: str
+    name: str = Field(min_length=2, max_length=120)
+    password: str = Field(min_length=8, max_length=128)
+    phone: Optional[str] = ""
+    accept_terms: bool
 
 
 class ChangeDecisionReq(BaseModel):
@@ -173,26 +194,157 @@ async def admin_delete_relay_point(pid: str, user: dict = Depends(require_module
 @router.get("/admin/logistics/accounts")
 async def admin_partner_accounts(user: dict = Depends(require_module("settings"))):
     rows = await db.users.find({"role": {"$in": list(PARTNER_ROLES)}}).sort("created_at", -1).to_list(1000)
-    return {"accounts": [_partner_public(u) for u in rows]}
+    now = now_iso()
+    await db.logistics_partner_invitations.update_many(
+        {"status": "PENDING", "expires_at": {"$lte": now}},
+        {"$set": {"status": "EXPIRED", "updated_at": now}},
+    )
+    invitations = await db.logistics_partner_invitations.find(
+        {"status": {"$in": ["PENDING", "EXPIRED", "COMPLETED"]}}, {"token_hash": 0}
+    ).sort("created_at", -1).to_list(500)
+    return {"accounts": [_partner_public(u) for u in rows],
+            "invitations": [{key: value for key, value in invitation.items() if key != "_id"}
+                            for invitation in invitations]}
 
 
 @router.post("/admin/logistics/accounts")
-async def admin_create_partner(req: PartnerAccountReq, user: dict = Depends(require_module("settings"))):
-    if req.role not in PARTNER_ROLES or not req.email or not req.name or not req.password or len(req.password) < 6:
-        raise HTTPException(status_code=400, detail="Nom, e-mail, mot de passe (6+ caractères) et rôle requis")
+async def admin_create_partner(req: PartnerInviteReq, request: Request,
+                               user: dict = Depends(require_admin_level())):
+    if req.role not in PARTNER_ROLES:
+        raise HTTPException(status_code=400, detail="Type de compte logistique invalide")
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Cet e-mail est déjà utilisé")
-    doc = {"name": req.name.strip(), "email": email, "password_hash": hash_password(req.password),
-           "phone": req.phone or "", "role": req.role, "country": req.country or "", "status": "ACTIVE",
-           "relay_point_id": req.relay_point_id if req.role == "RELAY_MANAGER" else None,
-           "carrier_id": req.carrier_id if req.role == "CARRIER_AGENT" else None,
-           "relay_edit_mode": req.relay_edit_mode if req.relay_edit_mode in EDIT_MODES else "NONE",
-           "token_version": 0, "email_verified": True, "created_at": now_iso(), "created_by": user["id"]}
-    res = await db.users.insert_one(doc)
-    doc["_id"] = res.inserted_id
-    await audit_log(user, "CREATE_PARTNER", "user", str(res.inserted_id), None, f"{req.role} {email}")
-    return {"account": _partner_public(doc)}
+    if req.role == "RELAY_MANAGER":
+        point = await db.relay_points.find_one({"id": req.relay_point_id, "active": True})
+        if not point:
+            raise HTTPException(status_code=400, detail="Choisissez un point relais actif.")
+        country = point.get("country") or req.country.strip()
+    else:
+        carrier = await db.carriers.find_one({"id": req.carrier_id, "active": True})
+        if not carrier:
+            raise HTTPException(status_code=400, detail="Choisissez un transporteur actif.")
+        country = req.country.strip()
+    if not country:
+        raise HTTPException(status_code=400, detail="Le pays est obligatoire.")
+    if req.relay_edit_mode not in EDIT_MODES:
+        raise HTTPException(status_code=400, detail="Mode de modification invalide.")
+    base = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    if not base.startswith("https://"):
+        raise HTTPException(status_code=503, detail="Le service d’invitation par e-mail n’est pas configuré.")
+
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    invitation = {
+        "id": new_id(),
+        "email": email,
+        "role": req.role,
+        "country": country,
+        "relay_point_id": req.relay_point_id if req.role == "RELAY_MANAGER" else None,
+        "carrier_id": req.carrier_id if req.role == "CARRIER_AGENT" else None,
+        "relay_edit_mode": req.relay_edit_mode,
+        "token_hash": token_hash,
+        "status": "PENDING",
+        "expires_at": (now + timedelta(hours=48)).isoformat(),
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "created_by": user["id"],
+    }
+    await db.logistics_partner_invitations.delete_many({"email": email, "status": "PENDING"})
+    await db.logistics_partner_invitations.insert_one(invitation)
+    link = f"{base}/partner/complete-invitation?token={token}"
+    role_label = "gestionnaire de point relais" if req.role == "RELAY_MANAGER" else "agent transporteur"
+    sent = await send_email(
+        to=email,
+        subject="Terminez la création de votre compte AfriMarket",
+        html=(
+            f"<p>Vous avez été invité à créer un compte AfriMarket comme {role_label}.</p>"
+            f"<p><a href=\"{escape(link, quote=True)}\">Terminer la création de mon compte</a></p>"
+            "<p>Ce lien est valable 48 heures et ne peut être utilisé qu’une seule fois. "
+            "Si vous n’attendiez pas cette invitation, ignorez cet e-mail.</p>"
+        ),
+    )
+    if not sent:
+        await db.logistics_partner_invitations.delete_one({"id": invitation["id"]})
+        raise HTTPException(status_code=502, detail="L’e-mail d’invitation n’a pas pu être envoyé.")
+    await audit_log(user, "INVITE_PARTNER", "logistics_invitation", invitation["id"], None,
+                    f"{req.role} {email}")
+    return {"invitation": {key: value for key, value in invitation.items() if key != "token_hash"}}
+
+
+@router.get("/logistics/invitations/{token}")
+async def get_partner_invitation(token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    invitation = await db.logistics_partner_invitations.find_one({
+        "token_hash": token_hash,
+        "status": "PENDING",
+        "expires_at": {"$gt": now_iso()},
+    })
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Lien d’invitation invalide, expiré ou déjà utilisé.")
+    return {"invitation": {"email": invitation["email"], "role": invitation["role"],
+                           "country": invitation["country"], "expires_at": invitation["expires_at"]}}
+
+
+@router.post("/logistics/invitations/complete")
+async def complete_partner_invitation(req: PartnerInviteCompleteReq):
+    if not req.accept_terms:
+        raise HTTPException(status_code=400, detail="Vous devez accepter les conditions d’utilisation.")
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    invitation = await db.logistics_partner_invitations.find_one({
+        "token_hash": token_hash,
+        "status": "PENDING",
+        "expires_at": {"$gt": now_iso()},
+    })
+    if not invitation:
+        raise HTTPException(status_code=400, detail="Lien d’invitation invalide, expiré ou déjà utilisé.")
+    if await db.users.find_one({"email": invitation["email"]}):
+        raise HTTPException(status_code=409, detail="Un compte utilise déjà cette adresse e-mail.")
+    claimed = await db.logistics_partner_invitations.update_one(
+        {"id": invitation["id"], "status": "PENDING", "expires_at": {"$gt": now_iso()}},
+        {"$set": {"status": "PROCESSING", "updated_at": now_iso()}},
+    )
+    if not claimed.modified_count:
+        raise HTTPException(status_code=409, detail="Cette invitation a déjà été utilisée.")
+    user_doc = {
+        "name": req.name.strip(),
+        "email": invitation["email"],
+        "password_hash": hash_password(req.password),
+        "phone": (req.phone or "").strip()[:40],
+        "role": invitation["role"],
+        "country": invitation["country"],
+        "status": "ACTIVE",
+        "relay_point_id": invitation.get("relay_point_id"),
+        "carrier_id": invitation.get("carrier_id"),
+        "relay_edit_mode": invitation.get("relay_edit_mode", "NONE"),
+        "token_version": 0,
+        "email_verified": True,
+        "phone_verified": False,
+        "kyc_status": "NONE",
+        "language": "fr",
+        "created_at": now_iso(),
+        "created_by": invitation["created_by"],
+        "invitation_id": invitation["id"],
+    }
+    try:
+        result = await db.users.insert_one(user_doc)
+    except Exception:
+        await db.logistics_partner_invitations.update_one(
+            {"id": invitation["id"], "status": "PROCESSING"},
+            {"$set": {"status": "PENDING", "updated_at": now_iso()}},
+        )
+        raise
+    user_doc["_id"] = result.inserted_id
+    await db.logistics_partner_invitations.update_one(
+        {"id": invitation["id"], "status": "PROCESSING"},
+        {"$set": {"status": "COMPLETED", "completed_at": now_iso(), "updated_at": now_iso()},
+         "$unset": {"token_hash": ""}},
+    )
+    actor = {"id": invitation["created_by"], "role": "ADMIN", "email": "", "name": ""}
+    await audit_log(actor, "COMPLETE_PARTNER_INVITATION", "user", str(result.inserted_id), None, invitation["role"])
+    account_token = create_access_token(str(result.inserted_id), invitation["email"], invitation["role"], 0)
+    return {"token": account_token, "account": _partner_public(user_doc)}
 
 
 @router.put("/admin/logistics/accounts/{uid}")

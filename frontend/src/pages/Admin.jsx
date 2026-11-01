@@ -844,6 +844,7 @@ export function AdminGlobalSettings() {
   const [taxesEnabled, setTaxesEnabled] = useState(false);
   const [countries, setCountries] = useState([]);
   const [csvImport, setCsvImport] = useState(false);
+  const [kycEnabled, setKycEnabled] = useState(true);
   const [nt, setNt] = useState({ country: "", zone: "", rate: "", label: "TVA", enabled: true });
   const [storefront, setStorefront] = useState({
     homepage_images: [],
@@ -859,6 +860,7 @@ export function AdminGlobalSettings() {
     api.get("/admin/settings").then((r) => {
       const settings = r.data.settings || {};
       setCsvImport(!!settings.csv_import_enabled);
+      setKycEnabled(settings.kyc_enabled !== false);
       const next = {
         homepage_images: settings.homepage_images || [],
         homepage_ads: { above_hero: false, below_hero: true, show_promotions: true, show_popular: false, ...(settings.homepage_ads || {}) },
@@ -874,6 +876,14 @@ export function AdminGlobalSettings() {
     setCsvImport(v);
     try { await api.put("/admin/settings", { csv_import_enabled: v }); toast.success("Import CSV mis à jour"); }
     catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const toggleKyc = async (value) => {
+    try {
+      await api.put("/admin/settings", { kyc_enabled: value });
+      setKycEnabled(value);
+      toast.success(value ? "Vérification KYC activée pour les commerçants" : "Vérification KYC désactivée");
+    } catch (e) { toast.error(apiErr(e)); }
   };
 
   const saveLegal = async () => {
@@ -950,6 +960,15 @@ export function AdminGlobalSettings() {
     <div>
       <PageHeader title="Paramétrage global" subtitle="Contenu légal & taxes par pays / zone" />
       <div className="space-y-6">
+        {me?.role === "SUPER_ADMIN" && (
+          <div className="bg-card border border-border rounded-xl p-5 flex items-center justify-between gap-4" data-testid="merchant-kyc-setting">
+            <div>
+              <h3 className="font-display font-bold">Vérification d’identité des commerçants (KYC)</h3>
+              <p className="text-xs text-muted-foreground mt-1">Quand cette option est désactivée, les commerçants peuvent créer leur boutique sans soumettre de KYC. Elle ne s’applique jamais aux comptes clients, administrateurs, points relais ou transporteurs.</p>
+            </div>
+            <Switch checked={kycEnabled} onCheckedChange={toggleKyc} data-testid="merchant-kyc-toggle" />
+          </div>
+        )}
         {/* Secure application export (super-admin only) */}
         {me?.role === "SUPER_ADMIN" && (
           <div className="bg-card border border-border rounded-xl p-5" data-testid="export-app-card">

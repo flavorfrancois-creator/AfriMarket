@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Pencil, Trash2, Plus, Check, X, Send } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
+import { useAuth } from "@/context/AuthContext";
 
 const POINT_FIELDS = [["name", "Nom"], ["code", "Code"], ["city", "Ville"], ["address", "Adresse"], ["phone", "Téléphone"], ["opening_hours", "Horaires"], ["lat", "Latitude"], ["lon", "Longitude"]];
 const MODES = [["NONE", "Aucune modification"], ["APPROVAL", "Avec validation admin"], ["DIRECT", "Modification directe"]];
@@ -80,21 +81,18 @@ function PointsTab({ points, countries, reload }) {
 }
 
 function NewAccountForm({ points, carriers, countries, onCreated }) {
-  const [f, setF] = useState({ role: "RELAY_MANAGER", relay_edit_mode: "NONE" });
+  const [f, setF] = useState({ role: "RELAY_MANAGER", relay_edit_mode: "NONE", country: "" });
   const create = async () => {
-    try { await api.post("/admin/logistics/accounts", f); toast.success("Compte créé"); setF({ role: "RELAY_MANAGER", relay_edit_mode: "NONE" }); onCreated(); }
+    try { await api.post("/admin/logistics/accounts", f); toast.success("Lien de création envoyé par e-mail"); setF({ role: "RELAY_MANAGER", relay_edit_mode: "NONE", country: "" }); onCreated(); }
     catch (e) { toast.error(apiErr(e)); }
   };
   return (
-    <div className="bg-card border border-border rounded-xl p-4 grid grid-cols-1 md:grid-cols-4 gap-2 items-end" data-testid="partner-create-form">
+    <div className="bg-card border border-border rounded-xl p-4 grid grid-cols-1 md:grid-cols-3 gap-2 items-end" data-testid="partner-create-form">
       <Select value={f.role} onValueChange={(v) => setF({ ...f, role: v })}>
         <SelectTrigger data-testid="partner-new-role"><SelectValue /></SelectTrigger>
         <SelectContent><SelectItem value="RELAY_MANAGER">Gestionnaire point relais</SelectItem><SelectItem value="CARRIER_AGENT">Transporteur</SelectItem></SelectContent>
       </Select>
-      <Input placeholder="Nom" value={f.name || ""} onChange={(e) => setF({ ...f, name: e.target.value })} data-testid="partner-new-name" />
-      <Input placeholder="E-mail" value={f.email || ""} onChange={(e) => setF({ ...f, email: e.target.value })} data-testid="partner-new-email" />
-      <Input placeholder="Mot de passe" type="password" value={f.password || ""} onChange={(e) => setF({ ...f, password: e.target.value })} data-testid="partner-new-password" />
-      <Input placeholder="Téléphone" value={f.phone || ""} onChange={(e) => setF({ ...f, phone: e.target.value })} data-testid="partner-new-phone" />
+      <Input type="email" placeholder="Adresse e-mail d’invitation" value={f.email || ""} onChange={(e) => setF({ ...f, email: e.target.value })} data-testid="partner-new-email" />
       <CountrySelect value={f.country} onChange={(v) => setF({ ...f, country: v })} countries={countries} testid="partner-new-country" />
       {f.role === "RELAY_MANAGER" ? (
         <Select value={f.relay_point_id || ""} onValueChange={(v) => setF({ ...f, relay_point_id: v })}>
@@ -107,7 +105,24 @@ function NewAccountForm({ points, carriers, countries, onCreated }) {
           <SelectContent>{carriers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
         </Select>
       )}
-      <Button className="rounded-full" onClick={create} data-testid="partner-new-submit">Créer le compte</Button>
+      <Button className="rounded-full" disabled={!f.email || (f.role === "RELAY_MANAGER" ? !f.relay_point_id : !f.carrier_id) || (f.role === "CARRIER_AGENT" && !f.country)} onClick={create} data-testid="partner-new-submit">
+        <Send className="w-4 h-4 mr-1" /> Envoyer le lien
+      </Button>
+    </div>
+  );
+}
+
+function InvitationsList({ invitations }) {
+  if (!invitations.length) return null;
+  return (
+    <div className="space-y-2" data-testid="partner-invitations">
+      <h3 className="text-sm font-semibold">Invitations envoyées</h3>
+      {invitations.map((invitation) => (
+        <div key={invitation.id} className="bg-card border border-border rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-sm" data-testid={`partner-invitation-${invitation.id}`}>
+          <div><strong>{invitation.email}</strong><span className="text-muted-foreground"> · {ROLE_LABEL[invitation.role]}</span></div>
+          <div className="text-xs text-muted-foreground">{invitation.status === "PENDING" ? `Lien valable jusqu’au ${new Date(invitation.expires_at).toLocaleString("fr-FR")}` : invitation.status === "COMPLETED" ? "Compte créé" : "Invitation expirée"}</div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -279,15 +294,17 @@ function BroadcastTab({ points, carriers, accounts }) {
 }
 
 export function AdminLogistics() {
+  const { user } = useAuth();
   const [points, setPoints] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [invitations, setInvitations] = useState([]);
   const [requests, setRequests] = useState([]);
   const [couriers, setCouriers] = useState([]);
   const [carriers, setCarriers] = useState([]);
   const [countries, setCountries] = useState([]);
   const load = () => {
     api.get("/admin/relay-points").then((r) => setPoints(r.data.relay_points)).catch(() => {});
-    api.get("/admin/logistics/accounts").then((r) => setAccounts(r.data.accounts)).catch(() => {});
+    api.get("/admin/logistics/accounts").then((r) => { setAccounts(r.data.accounts); setInvitations(r.data.invitations || []); }).catch(() => {});
     api.get("/admin/relay-change-requests").then((r) => setRequests(r.data.requests)).catch(() => {});
     api.get("/admin/local-couriers").then((r) => setCouriers(r.data.couriers)).catch(() => {});
   };
@@ -296,7 +313,8 @@ export function AdminLogistics() {
     api.get("/logistics/carriers").then((r) => setCarriers(r.data.carriers)).catch(() => {});
     api.get("/config/countries").then((r) => setCountries(r.data.countries)).catch(() => {});
   }, []);
-  const pending = accounts.filter((a) => a.status === "PENDING").length;
+  const pending = accounts.filter((a) => a.status === "PENDING").length + invitations.filter((invitation) => invitation.status === "PENDING").length;
+  const canInvite = ["ADMIN", "SUPER_ADMIN"].includes(user?.role);
   return (
     <div>
       <PageHeader title="Réseau logistique" subtitle="Points relais, comptes partenaires, demandes de modification et livreurs locaux" />
@@ -311,7 +329,11 @@ export function AdminLogistics() {
         </TabsList>
         <TabsContent value="points" className="mt-4"><PointsTab points={points} countries={countries} reload={load} /></TabsContent>
         <TabsContent value="accounts" className="mt-4 space-y-3">
-          <NewAccountForm points={points} carriers={carriers} countries={countries} onCreated={load} />
+          {canInvite && <>
+            <p className="text-sm text-muted-foreground">Saisissez l’e-mail et l’affectation du point relais ou du transporteur. La personne reçoit un lien sécurisé à usage unique pour choisir son nom et son mot de passe.</p>
+            <NewAccountForm points={points} carriers={carriers} countries={countries} onCreated={load} />
+            <InvitationsList invitations={invitations} />
+          </>}
           {accounts.map((a) => <AccountRow key={a.id} a={a} points={points} carriers={carriers} reload={load} />)}
         </TabsContent>
         <TabsContent value="requests" className="mt-4"><RequestsTab requests={requests} reload={load} /></TabsContent>

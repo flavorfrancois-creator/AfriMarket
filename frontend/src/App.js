@@ -11,7 +11,7 @@ import { PublicLayout, ProtectedRoute } from "@/components/common";
 
 import Home from "@/pages/Home";
 import { Products, Shops, ShopDetail, ProductDetail, Cart, Checkout, StaticPage } from "@/pages/Public";
-import { Login, Register, ForgotPassword, ResetPassword, ConfirmDeletion } from "@/pages/Auth";
+import { Login, Register, ForgotPassword, ResetPassword, ConfirmDeletion, CompletePartnerInvitation } from "@/pages/Auth";
 import {
   ClientLayout, ClientOverview, ClientOrders, ClientWallet, ClientWithdrawals,
   ClientInvitation, ClientProfile, ClientFavorites, ClientPrivateClient, ClientScan,
@@ -60,6 +60,7 @@ function App() {
 
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
+              <Route path="/partner/complete-invitation" element={<CompletePartnerInvitation />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/confirm-deletion" element={<ConfirmDeletion />} />
