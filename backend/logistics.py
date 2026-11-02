@@ -258,6 +258,7 @@ async def admin_create_partner(req: PartnerInviteReq, request: Request,
     sent = await send_email(
         to=email,
         subject="Terminez la création de votre compte AfriMarket",
+        country=country,
         html=(
             f"<p>Vous avez été invité à créer un compte AfriMarket comme {role_label}.</p>"
             f"<p><a href=\"{escape(link, quote=True)}\">Terminer la création de mon compte</a></p>"
@@ -763,13 +764,15 @@ async def admin_broadcast(req: BroadcastReq, user: dict = Depends(require_module
     subject, body = req.subject.strip()[:150], req.body.strip()[:4000]
     if not subject or not body:
         raise HTTPException(status_code=400, detail="Objet et message requis")
-    recipients = await db.users.find(await _broadcast_query(req.target, req.target_id), {"_id": 1, "email": 1}).to_list(1000)
+    recipients = await db.users.find(await _broadcast_query(req.target, req.target_id),
+                                     {"_id": 1, "email": 1, "country": 1}).to_list(1000)
     if not recipients:
         raise HTTPException(status_code=400, detail="Aucun compte actif pour ce destinataire")
     for r in recipients:
         await notify(str(r["_id"]), "ADMIN_MESSAGE", subject, body, "/partner/messages")
         if req.email and r.get("email"):
-            task = asyncio.create_task(send_email(to=r["email"], subject=subject, html=_html(body)))
+            task = asyncio.create_task(send_email(to=r["email"], subject=subject, html=_html(body),
+                                                  country=r.get("country")))
             _bg.add(task)
             task.add_done_callback(_bg.discard)
     doc = {"id": new_id(), "target": req.target, "target_id": req.target_id, "subject": subject, "body": body,

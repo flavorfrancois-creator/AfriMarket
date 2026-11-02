@@ -219,16 +219,22 @@ async def get_template(key: str) -> dict:
     content = {lg: {**base["content"][lg], **(over.get("content", {}).get(lg) or {})} for lg in LANGS}
     return {**base, "content": content, "enabled": True if key in CRITICAL else over.get("enabled", True),
             "email_enabled": True if key in CRITICAL else over.get("email_enabled", True), "customized": bool(over),
+            "email_provider_ids": over.get("email_provider_ids", []),
+            "email_provider_ids_by_country": over.get("email_provider_ids_by_country", {}),
             "scheduled_only": key in UNTRIGGERED, "critical": key in CRITICAL}
 
 
-async def render(key: str, lang: str, vars: dict) -> Optional[dict]:
+async def render(key: str, lang: str, vars: dict, country: Optional[str] = None) -> Optional[dict]:
     t = await get_template(key)
     if not t["enabled"]:
         return None
     c = t["content"].get(lang if lang in LANGS else "fr") or t["content"]["fr"]
     v = _Safe({k: ("" if val is None else val) for k, val in vars.items()})
-    return {"subject": c["subject"].format_map(v), "body": c["body"].format_map(v), "email": t["email_enabled"]}
+    provider_ids = t["email_provider_ids"]
+    if country in t["email_provider_ids_by_country"]:
+        provider_ids = t["email_provider_ids_by_country"][country]
+    return {"subject": c["subject"].format_map(v), "body": c["body"].format_map(v), "email": t["email_enabled"],
+            "email_provider_ids": provider_ids}
 
 
 def _html(body: str) -> str:
@@ -248,12 +254,13 @@ async def send_message(user_id: str, key: str, vars: dict, link: str = None, nty
     if not u:
         return
     vars = {"name": u.get("name", ""), **vars}
-    msg = await render(key, u.get("language") or "fr", vars)
+    msg = await render(key, u.get("language") or "fr", vars, u.get("country"))
     if not msg:
         return
     await notify(user_id, ntype, msg["subject"], msg["body"].replace("\n", " "), link)
     if msg["email"] and u.get("email"):
-        task = asyncio.create_task(send_email(to=u["email"], subject=msg["subject"], html=_html(msg["body"])))
+        task = asyncio.create_task(send_email(to=u["email"], subject=msg["subject"], html=_html(msg["body"]),
+                                              profile_ids=msg["email_provider_ids"], country=u.get("country")))
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)
 
@@ -263,11 +270,12 @@ async def send_to_users(query: dict, key: str, vars: dict, link: str = None, nty
         await send_message(str(u["_id"]), key, vars, link, ntype)
 
 
-async def auth_email(to: str, key: str, vars: dict, lang: str = "fr"):
+async def auth_email(to: str, key: str, vars: dict, lang: str = "fr", country: Optional[str] = None):
     from emailer import send_email
-    msg = await render(key, lang, vars)
+    msg = await render(key, lang, vars, country)
     if msg and msg["email"]:
-        return await send_email(to=to, subject=msg["subject"], html=_html(msg["body"]))
+        return await send_email(to=to, subject=msg["subject"], html=_html(msg["body"]),
+                                profile_ids=msg["email_provider_ids"], country=country)
     return False
 
 
@@ -280,10 +288,84 @@ def _dec(v: str) -> str:
     return _cipher.decrypt(v.encode()).decode()
 
 
-async def custom_send(to: str, subject: str, html: str) -> Optional[bool]:
+async def _ensure_email_profiles() -> list:
+    profiles = await db.email_profiles.find({}, {"_id": 0}).to_list(500)
+    if profiles:
+        return profiles
+    legacy = await db.email_settings.find_one({"_id": "email_settings"}) or {}
+    if legacy.get("profiles_migrated") or legacy.get("provider") not in ("resend", "smtp"):
+        return []
+    profile = {
+        "id": "legacy-email-settings",
+        "name": "Profil e-mail existant",
+        "provider": legacy["provider"],
+        "enabled": bool(legacy.get("enabled")),
+        "from_email": legacy.get("from_email", ""),
+        "smtp_host": legacy.get("smtp_host"),
+        "smtp_port": legacy.get("smtp_port", 587),
+        "smtp_username": legacy.get("smtp_username"),
+        "smtp_starttls": legacy.get("smtp_starttls", True),
+        "resend_api_key_ct": legacy.get("resend_api_key_ct"),
+        "smtp_password_ct": legacy.get("smtp_password_ct"),
+        "created_at": legacy.get("updated_at") or now_iso(),
+        "updated_at": legacy.get("updated_at") or now_iso(),
+    }
+    await db.email_profiles.update_one({"id": profile["id"]}, {"$setOnInsert": profile}, upsert=True)
+    await db.email_settings.update_one({"_id": "email_settings"}, {"$set": {"profiles_migrated": True}})
+    return await db.email_profiles.find({}, {"_id": 0}).to_list(500)
+
+
+async def _send_email_profile(cfg: dict, to: str, subject: str, html: str) -> None:
+    if cfg["provider"] == "resend":
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as c:
+            response = await c.post(
+                "https://api.resend.com/emails",
+                json={"from": cfg["from_email"], "to": [to], "subject": subject, "html": html},
+                headers={"Authorization": "Bearer " + _dec(cfg["resend_api_key_ct"]),
+                         "Content-Type": "application/json", "User-Agent": "afrimarket-email/1.0"},
+            )
+        if response.is_error:
+            raise RuntimeError(f"Resend {response.status_code}")
+    else:
+        await asyncio.to_thread(_smtp_send, cfg, to, subject, html)
+
+
+async def custom_send(to: str, subject: str, html: str, profile_ids: Optional[list] = None,
+                      country: Optional[str] = None) -> Optional[bool]:
+    profiles = await _ensure_email_profiles()
+    if not profiles:
+        return await _legacy_custom_send(to, subject, html)
+    requested = list(dict.fromkeys(profile_ids or []))
+    enabled = [
+        p for p in profiles
+        if p.get("enabled") and p.get("provider") in ("resend", "smtp")
+        and (not p.get("countries") or country in p.get("countries", []))
+    ]
+    if requested:
+        by_id = {p["id"]: p for p in enabled}
+        if any(pid not in by_id for pid in requested):
+            return False
+        selected = [by_id[pid] for pid in requested]
+    else:
+        selected = enabled
+    if not selected:
+        return None if not requested else False
+    successes = 0
+    for cfg in selected:
+        try:
+            await _send_email_profile(cfg, to, subject, html)
+            await _log("email", cfg.get("name") or cfg["provider"], to, subject, "SENT")
+            successes += 1
+        except Exception as e:
+            logger.error("Custom email profile %s failed: %s", cfg.get("name") or cfg["provider"], e)
+            await _log("email", cfg.get("name") or cfg["provider"], to, subject, "FAILED")
+    return successes > 0
+
+
+async def _legacy_custom_send(to: str, subject: str, html: str) -> Optional[bool]:
     """Send through the admin-configured provider. None = no custom provider enabled."""
     cfg = await db.email_settings.find_one({"_id": "email_settings"})
-    if not cfg or not cfg.get("enabled") or cfg.get("provider") not in ("resend", "smtp"):
+    if not cfg or cfg.get("profiles_migrated") or not cfg.get("enabled") or cfg.get("provider") not in ("resend", "smtp"):
         return None
     try:
         if cfg["provider"] == "resend":
@@ -358,6 +440,20 @@ class EmailSettingsReq(BaseModel):
     smtp_starttls: bool = True
 
 
+class EmailProfileReq(BaseModel):
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    enabled: Optional[bool] = None
+    from_email: Optional[str] = None
+    resend_api_key: Optional[str] = None
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_username: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_starttls: Optional[bool] = None
+    countries: Optional[list] = None
+
+
 class ProviderReq(BaseModel):
     channel: Optional[str] = None
     name: Optional[str] = None
@@ -374,6 +470,8 @@ class TemplateReq(BaseModel):
     content: Optional[dict] = None
     enabled: Optional[bool] = None
     email_enabled: Optional[bool] = None
+    email_provider_ids: Optional[list] = None
+    email_provider_ids_by_country: Optional[dict] = None
 
 
 def _email_public(d: dict) -> dict:
@@ -384,6 +482,24 @@ def _email_public(d: dict) -> dict:
             "updated_at": d.get("updated_at")}
 
 
+def _email_profile_public(profile: dict) -> dict:
+    return {
+        "id": profile["id"],
+        "name": profile.get("name", ""),
+        "provider": profile.get("provider", "smtp"),
+        "enabled": bool(profile.get("enabled")),
+        "from_email": profile.get("from_email", ""),
+        "smtp_host": profile.get("smtp_host"),
+        "smtp_port": profile.get("smtp_port", 587),
+        "smtp_username": profile.get("smtp_username"),
+        "smtp_starttls": profile.get("smtp_starttls", True),
+        "countries": profile.get("countries", []),
+        "has_resend_key": bool(profile.get("resend_api_key_ct")),
+        "has_smtp_password": bool(profile.get("smtp_password_ct")),
+        "updated_at": profile.get("updated_at"),
+    }
+
+
 def _provider_public(p: dict) -> dict:
     out = {k: v for k, v in p.items() if k not in ("_id", "api_key_ct")}
     out["has_api_key"] = bool(p.get("api_key_ct"))
@@ -392,7 +508,9 @@ def _provider_public(p: dict) -> dict:
 
 @router.get("/admin/comm/email")
 async def get_email_settings(user: dict = Depends(require_module("settings"))):
-    return {"email": _email_public(await db.email_settings.find_one({"_id": "email_settings"}) or {})}
+    profiles = await _ensure_email_profiles()
+    return {"email": _email_public(await db.email_settings.find_one({"_id": "email_settings"}) or {}),
+            "profiles": [_email_profile_public(p) for p in profiles]}
 
 
 @router.put("/admin/comm/email")
@@ -422,7 +540,135 @@ async def save_email_settings(req: EmailSettingsReq, user: dict = Depends(requir
 async def test_email(user: dict = Depends(require_module("settings"))):
     from emailer import send_email
     ok = await send_email(to=user["email"], subject="Test d'envoi AfriMarket",
-                          html="<p>Ceci est un e-mail de test envoyé depuis Authentification et information.</p>")
+                          html="<p>Ceci est un e-mail de test envoyé depuis Authentification et information.</p>",
+                          country=user.get("country"))
+    return {"sent": bool(ok), "to": user["email"]}
+
+
+@router.post("/admin/comm/email/profiles")
+async def create_email_profile(req: EmailProfileReq, user: dict = Depends(require_module("settings"))):
+    await _ensure_email_profiles()
+    if not req.name or not req.name.strip() or req.provider not in ("resend", "smtp"):
+        raise HTTPException(status_code=400, detail="Nom et fournisseur e-mail requis")
+    countries = _normalize_email_countries(req.countries or [])
+    profile = {
+        "id": new_id(),
+        "name": req.name.strip(),
+        "provider": req.provider,
+        "enabled": bool(req.enabled),
+        "from_email": (req.from_email or "").strip(),
+        "smtp_host": (req.smtp_host or "").strip() or None,
+        "smtp_port": int(req.smtp_port or 587),
+        "smtp_username": (req.smtp_username or "").strip() or None,
+        "smtp_starttls": True if req.smtp_starttls is None else bool(req.smtp_starttls),
+        "countries": countries,
+        "resend_api_key_ct": _enc(req.resend_api_key.strip()) if req.resend_api_key else None,
+        "smtp_password_ct": _enc(req.smtp_password) if req.smtp_password else None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    _validate_email_profile(profile)
+    await db.email_profiles.insert_one(profile)
+    from business import audit_log
+    await audit_log(user, "CREATE_EMAIL_PROFILE", "settings", "email", profile["id"], profile["name"])
+    return {"profile": _email_profile_public(profile)}
+
+
+def _normalize_email_countries(countries: list) -> list:
+    from config_data import COUNTRIES
+    valid = {country["name"] for country in COUNTRIES}
+    if any(not isinstance(country, str) or country not in valid for country in countries):
+        raise HTTPException(status_code=400, detail="Pays de profil e-mail invalide")
+    return list(dict.fromkeys(countries))
+
+
+def _validate_email_profile(profile: dict) -> None:
+    if profile.get("provider") not in ("resend", "smtp"):
+        raise HTTPException(status_code=400, detail="Fournisseur e-mail invalide")
+    if not profile.get("name", "").strip():
+        raise HTTPException(status_code=400, detail="Nom du profil requis")
+    if not profile.get("enabled"):
+        return
+    if not profile.get("from_email"):
+        raise HTTPException(status_code=400, detail="Adresse d'expédition requise")
+    if profile["provider"] == "resend" and not profile.get("resend_api_key_ct"):
+        raise HTTPException(status_code=400, detail="Clé API Resend requise")
+    if profile["provider"] == "smtp" and not (
+        profile.get("smtp_host") and profile.get("smtp_username") and profile.get("smtp_password_ct")
+    ):
+        raise HTTPException(status_code=400, detail="Serveur, identifiant et mot de passe SMTP requis")
+
+
+@router.put("/admin/comm/email/profiles/{profile_id}")
+async def update_email_profile(profile_id: str, req: EmailProfileReq, user: dict = Depends(require_module("settings"))):
+    profile = await db.email_profiles.find_one({"id": profile_id})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profil e-mail introuvable")
+    fields = ("name", "provider", "enabled", "from_email", "smtp_host", "smtp_port", "smtp_username", "smtp_starttls")
+    for field in fields:
+        value = getattr(req, field)
+        if value is not None:
+            profile[field] = value.strip() if field in ("name", "from_email", "smtp_host", "smtp_username") and isinstance(value, str) else value
+    if req.countries is not None:
+        profile["countries"] = _normalize_email_countries(req.countries)
+    if req.resend_api_key:
+        profile["resend_api_key_ct"] = _enc(req.resend_api_key.strip())
+    if req.smtp_password:
+        profile["smtp_password_ct"] = _enc(req.smtp_password)
+    profile["updated_at"] = now_iso()
+    _validate_email_profile(profile)
+    await db.email_profiles.replace_one({"id": profile_id}, profile)
+    if req.enabled is False:
+        await _remove_email_profile_assignments(profile_id)
+    elif req.countries is not None:
+        await _remove_email_profile_assignments(profile_id, profile["countries"])
+    from business import audit_log
+    await audit_log(user, "UPDATE_EMAIL_PROFILE", "settings", "email", profile_id, profile["name"])
+    return {"profile": _email_profile_public(profile)}
+
+
+@router.delete("/admin/comm/email/profiles/{profile_id}")
+async def delete_email_profile(profile_id: str, user: dict = Depends(require_module("settings"))):
+    result = await db.email_profiles.delete_one({"id": profile_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Profil e-mail introuvable")
+    await _remove_email_profile_assignments(profile_id)
+    from business import audit_log
+    await audit_log(user, "DELETE_EMAIL_PROFILE", "settings", "email", profile_id, "")
+    return {"message": "Profil e-mail supprimé"}
+
+
+async def _remove_email_profile_assignments(profile_id: str, countries: Optional[list] = None) -> None:
+    if countries is None or countries:
+        await db.message_templates.update_many({}, {"$pull": {"email_provider_ids": profile_id}})
+    rows = await db.message_templates.find(
+        {"email_provider_ids_by_country": {"$exists": True}},
+        {"email_provider_ids_by_country": 1},
+    ).to_list(500)
+    for row in rows:
+        mapping = row.get("email_provider_ids_by_country") or {}
+        updated = {}
+        for country, ids in mapping.items():
+            remove = countries is None or (countries and country not in countries)
+            updated[country] = [pid for pid in ids if pid != profile_id] if remove else ids
+        if updated != mapping:
+            await db.message_templates.update_one(
+                {"_id": row["_id"]}, {"$set": {"email_provider_ids_by_country": updated}}
+            )
+
+
+@router.post("/admin/comm/email/profiles/{profile_id}/test")
+async def test_email_profile(profile_id: str, user: dict = Depends(require_module("settings"))):
+    profile = await db.email_profiles.find_one({"id": profile_id})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profil e-mail introuvable")
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="Activez ce profil avant de le tester")
+    from emailer import send_email
+    ok = await send_email(to=user["email"], subject="Test d'envoi AfriMarket",
+                          html="<p>Test du profil e-mail depuis Authentification et information.</p>",
+                          profile_ids=[profile_id],
+                          country=(profile.get("countries") or [None])[0])
     return {"sent": bool(ok), "to": user["email"]}
 
 
@@ -492,6 +738,50 @@ async def update_template(key: str, req: TemplateReq, user: dict = Depends(requi
         upd["enabled"] = bool(req.enabled)
     if req.email_enabled is not None:
         upd["email_enabled"] = bool(req.email_enabled)
+    if req.email_provider_ids is not None:
+        if any(not isinstance(pid, str) for pid in req.email_provider_ids):
+            raise HTTPException(status_code=400, detail="Sélection de profils e-mail invalide")
+        profile_ids = list(dict.fromkeys(req.email_provider_ids))
+        profiles = await db.email_profiles.find(
+            {"id": {"$in": profile_ids}, "enabled": True}, {"id": 1}
+        ).to_list(500)
+        if len(profiles) != len(profile_ids):
+            raise HTTPException(status_code=400, detail="Chaque profil sélectionné doit exister et être activé")
+        upd["email_provider_ids"] = profile_ids
+    if req.email_provider_ids_by_country is not None:
+        from config_data import COUNTRIES
+        valid_countries = {country["name"] for country in COUNTRIES}
+        mapping = {}
+        for country, ids in req.email_provider_ids_by_country.items():
+            if country not in valid_countries or not isinstance(ids, list) or any(not isinstance(pid, str) for pid in ids):
+                raise HTTPException(status_code=400, detail="Affectation pays/profils e-mail invalide")
+            profile_ids = list(dict.fromkeys(ids))
+            profiles = await db.email_profiles.find(
+                {"id": {"$in": profile_ids}, "enabled": True}, {"id": 1, "countries": 1}
+            ).to_list(500)
+            if len(profiles) != len(profile_ids):
+                raise HTTPException(status_code=400, detail="Chaque profil sélectionné doit exister et être activé")
+            if any(profile.get("countries") and country not in profile["countries"] for profile in profiles):
+                raise HTTPException(status_code=400, detail="Un profil sélectionné n'est pas affecté à ce pays")
+            mapping[country] = profile_ids
+        upd["email_provider_ids_by_country"] = mapping
+    if req.email_provider_ids_by_country is not None:
+        from config_data import COUNTRIES
+        valid_countries = {country["name"] for country in COUNTRIES}
+        mapping = {}
+        for country, ids in req.email_provider_ids_by_country.items():
+            if country not in valid_countries or not isinstance(ids, list) or any(not isinstance(pid, str) for pid in ids):
+                raise HTTPException(status_code=400, detail="Affectation pays/profils e-mail invalide")
+            profile_ids = list(dict.fromkeys(ids))
+            profiles = await db.email_profiles.find(
+                {"id": {"$in": profile_ids}, "enabled": True}, {"id": 1, "countries": 1}
+            ).to_list(500)
+            if len(profiles) != len(profile_ids):
+                raise HTTPException(status_code=400, detail="Chaque profil sélectionné doit exister et être activé")
+            if any(profile.get("countries") and country not in profile["countries"] for profile in profiles):
+                raise HTTPException(status_code=400, detail="Un profil sélectionné n'est pas affecté à ce pays")
+            mapping[country] = profile_ids
+        upd["email_provider_ids_by_country"] = mapping
     if upd:
         await db.message_templates.update_one({"key": key}, {"$set": {**upd, "updated_at": now_iso()}}, upsert=True)
     return {"template": await get_template(key)}

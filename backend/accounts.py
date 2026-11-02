@@ -91,11 +91,12 @@ async def _notify_admins(title: str, body: str, link: str):
         await notify(str(a["_id"]), "ACCOUNT_DELETION", title, body, link)
 
 
-def _mail(to: str, subject: str, paragraphs: list, link: Optional[tuple] = None):
+def _mail(to: str, subject: str, paragraphs: list, link: Optional[tuple] = None,
+          country: Optional[str] = None):
     html = "".join(f"<p>{escape(p)}</p>" for p in paragraphs)
     if link:
         html += f'<p><a href="{escape(link[0])}">{escape(link[1])}</a></p>'
-    _spawn(send_email(to=to, subject=subject, html=_wrap(html)))
+    _spawn(send_email(to=to, subject=subject, html=_wrap(html), country=country))
 
 
 # ---------------- Password ----------------
@@ -148,7 +149,7 @@ async def contact_request(req: ContactReq, user: dict = Depends(get_current_user
     await db.contact_changes.insert_one(dict(doc))
     sent = False
     if req.kind == "email":
-        sent = await send_email(to=value, subject="Code de confirmation AfriMarket", html=_wrap(
+        sent = await send_email(to=value, subject="Code de confirmation AfriMarket", country=user.get("country"), html=_wrap(
             f"<p>Votre code pour confirmer votre nouvelle adresse e-mail : <strong>{code}</strong></p>"
             "<p>Ce code expire dans 10 minutes. Si vous n'êtes pas à l'origine de cette demande, ignorez ce message.</p>"))
     else:
@@ -181,7 +182,8 @@ async def contact_confirm(req: ContactConfirmReq, user: dict = Depends(get_curre
         if user.get("email"):
             _mail(user["email"], "Votre adresse e-mail AfriMarket a été modifiée",
                   [f"L'adresse e-mail de votre compte a été remplacée par {ch['value']}.",
-                   "Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement le support."])
+                   "Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement le support."],
+                  country=user.get("country"))
     else:
         await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"phone": ch["value"], "phone_verified": True}})
     await notify(user["id"], "SECURITY", "Coordonnées modifiées",
@@ -341,13 +343,13 @@ async def admin_decide_deletion(rid: str, req: DecisionReq, user: dict = Depends
     await db.account_deletion_requests.update_one({"id": rid}, {"$set": {
         "status": "AWAITING_USER", "decided_at": now_iso(), "confirm_token_hash": _h(token), "confirm_expires": expires}})
     link = f"{os.environ['FRONTEND_URL'].rstrip('/')}/confirm-deletion?token={token}"
-    target = await db.users.find_one({"_id": ObjectId(r["user_id"])}, {"email": 1})
+    target = await db.users.find_one({"_id": ObjectId(r["user_id"])}, {"email": 1, "country": 1})
     if target and target.get("email"):
         _mail(target["email"], "Confirmez la suppression de votre compte AfriMarket",
               ["Votre demande de suppression de compte a été approuvée par nos administrateurs.",
                f"Pour la rendre définitive, confirmez-la vous-même avec le lien ci-dessous (valable {CONFIRM_DAYS} jours).",
                "Si vous avez changé d'avis, ignorez cet e-mail ou annulez la demande depuis votre compte."],
-              (link, "Confirmer la suppression de mon compte"))
+              (link, "Confirmer la suppression de mon compte"), country=target.get("country"))
     await notify(r["user_id"], "ACCOUNT", "Suppression approuvée",
                  "Un e-mail vous a été envoyé pour confirmer vous-même la suppression définitive de votre compte.",
                  "/account/security")
@@ -443,7 +445,8 @@ async def _do_restore(r: dict):
     await db.deleted_accounts.delete_one({"id": d["id"]})
     _mail(new["email"], "Votre compte AfriMarket a été restauré",
           ["Votre ancien compte et son historique ont été restaurés.",
-           "Connectez-vous avec l'adresse e-mail et le mot de passe de votre nouvelle inscription."])
+           "Connectez-vous avec l'adresse e-mail et le mot de passe de votre nouvelle inscription."],
+          country=new.get("country"))
 
 
 @router.put("/admin/restore-requests/{rid}")

@@ -4,6 +4,7 @@ import re
 import ipaddress
 import logging
 import httpx
+from typing import Optional
 from html import escape
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -87,7 +88,8 @@ def _assert_safe_email(subject: str, html: str) -> None:
                 raise ValueError(f"Anchor text {m.group(1)!r} != real link host {real!r} (G3)")
 
 
-async def send_email(*, to: str, subject: str, html: str) -> bool:
+async def send_email(*, to: str, subject: str, html: str, profile_ids: Optional[list] = None,
+                     country: Optional[str] = None) -> bool:
     """Send an email. Returns True on success; never raises to callers (best-effort)."""
     try:
         _assert_safe_email(subject, html)
@@ -95,7 +97,7 @@ async def send_email(*, to: str, subject: str, html: str) -> bool:
         logger.error("Email blocked by guardrail: %s", e)
         return False
     from messaging import custom_send
-    custom = await custom_send(to, subject, html)
+    custom = await custom_send(to, subject, html, profile_ids=profile_ids, country=country)
     if custom is not None:
         return custom
     base = os.environ.get("FRONTEND_URL", "").rstrip("/")
@@ -127,21 +129,24 @@ def _wrap(inner: str) -> str:
     )
 
 
-async def send_verification_email(to_email: str, code: str, lang: str = "fr", name: str = "") -> bool:
+async def send_verification_email(to_email: str, code: str, lang: str = "fr", name: str = "",
+                                  country: Optional[str] = None) -> bool:
     from messaging import auth_email
-    return await auth_email(to_email, "auth_verify_email", {"code": code, "name": name}, lang)
+    return await auth_email(to_email, "auth_verify_email", {"code": code, "name": name}, lang, country)
 
 
-async def send_2fa_code(to_email: str, code: str, lang: str = "fr", name: str = "") -> bool:
+async def send_2fa_code(to_email: str, code: str, lang: str = "fr", name: str = "",
+                        country: Optional[str] = None) -> bool:
     from messaging import auth_email
-    return await auth_email(to_email, "auth_otp", {"code": code, "name": name}, lang)
+    return await auth_email(to_email, "auth_otp", {"code": code, "name": name}, lang, country)
 
 
-async def send_password_reset_email(to_email: str, token: str, lang: str = "fr", name: str = "") -> bool:
+async def send_password_reset_email(to_email: str, token: str, lang: str = "fr", name: str = "",
+                                    country: Optional[str] = None) -> bool:
     from messaging import auth_email
     base = os.environ.get("FRONTEND_URL", "").rstrip("/")
     link = f"{base}/reset-password?token={token}"
     if not base.startswith("https://"):
         logger.error("Password reset email not configured")
         return False
-    return await auth_email(to_email, "auth_password_reset", {"link": link, "name": name}, lang)
+    return await auth_email(to_email, "auth_password_reset", {"link": link, "name": name}, lang, country)

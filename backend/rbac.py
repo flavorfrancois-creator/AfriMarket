@@ -120,7 +120,7 @@ def require_admin_level():
 
 DEFAULT_SETTINGS = {
     "_id": "global",
-    "two_factor_scope": "NONE",          # NONE | STAFF | ALL
+    "two_factor_scope": "NONE",          # NONE | STAFF | CLIENT_ONLY | MERCHANT_ONLY | ALL
     "two_factor_channels": ["email"],     # subset of email|sms|whatsapp
     "two_factor_delivery_disabled": False,
     "refund_threshold": 100000.0,         # amount above which double-validation applies
@@ -178,5 +178,9 @@ def requires_2fa(user: dict, settings: dict) -> bool:
     if scope == "ALL":
         return True
     if scope == "STAFF" and is_staff(user):
+        return True
+    if scope == "CLIENT_ONLY" and user.get("role") == "CLIENT":
+        return True
+    if scope == "MERCHANT_ONLY" and user.get("role") == "MERCHANT":
         return True
     return False

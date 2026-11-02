@@ -1377,6 +1377,8 @@ export function AdminSecurity() {
                 <SelectContent>
                   <SelectItem value="NONE">Désactivée</SelectItem>
                   <SelectItem value="STAFF">Administrateurs & gestionnaires</SelectItem>
+                  <SelectItem value="CLIENT_ONLY">Clients uniquement</SelectItem>
+                  <SelectItem value="MERCHANT_ONLY">Commerçants uniquement</SelectItem>
                   <SelectItem value="ALL">Tous les comptes</SelectItem>
                 </SelectContent>
               </Select>

@@ -7,60 +7,107 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Mail, MessageSquare, Trash2, RotateCcw, Send, Pencil } from "lucide-react";
 
 const LANG_LABEL = { fr: "Français", en: "English", es: "Español" };
 const AUDIENCES = [["client", "Clients"], ["merchant", "Commerçants"], ["carrier", "Transporteurs"], ["relay", "Points relais"]];
 
 function EmailProvider() {
-  const [s, setS] = useState(null);
-  const [secret, setSecret] = useState("");
-  useEffect(() => { api.get("/admin/comm/email").then((r) => setS(r.data.email)).catch(() => {}); }, []);
-  if (!s) return null;
-  const set = (k, v) => setS({ ...s, [k]: v });
+  const empty = { name: "", countries: [], provider: "smtp", enabled: false, from_email: "", smtp_host: "", smtp_port: 587, smtp_username: "", smtp_starttls: true, smtp_password: "", resend_api_key: "" };
+  const [profiles, setProfiles] = useState([]);
+  const [countries, setCountries] = useState([]);
+  const [form, setForm] = useState(empty);
+  const [editing, setEditing] = useState("");
+  const load = () => api.get("/admin/comm/email").then((r) => setProfiles(r.data.profiles || [])).catch((e) => toast.error(apiErr(e)));
+  useEffect(() => {
+    load();
+    api.get("/config/countries").then((r) => setCountries(r.data.countries || [])).catch((e) => toast.error(apiErr(e)));
+  }, []);
+  const set = (k, v) => setForm((current) => ({ ...current, [k]: v }));
   const save = async () => {
-    const body = { ...s };
-    if (s.provider === "resend" && secret) body.resend_api_key = secret;
-    if (s.provider === "smtp" && secret) body.smtp_password = secret;
-    try { const { data } = await api.put("/admin/comm/email", body); setS(data.email); setSecret(""); toast.success("Fournisseur e-mail enregistré"); }
+    const body = { ...form };
+    if (!body.smtp_password) delete body.smtp_password;
+    if (!body.resend_api_key) delete body.resend_api_key;
+    try {
+      if (editing) await api.put(`/admin/comm/email/profiles/${editing}`, body);
+      else await api.post("/admin/comm/email/profiles", body);
+      toast.success(editing ? "Profil e-mail mis à jour" : "Profil e-mail ajouté");
+      setForm(empty);
+      setEditing("");
+      await load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const edit = (profile) => {
+    setEditing(profile.id);
+    setForm({ ...empty, ...profile, countries: profile.countries || [], smtp_password: "", resend_api_key: "" });
+  };
+  const updateEnabled = async (profile, enabled) => {
+    try { await api.put(`/admin/comm/email/profiles/${profile.id}`, { enabled }); await load(); }
     catch (e) { toast.error(apiErr(e)); }
   };
-  const test = async () => {
-    try { const { data } = await api.post("/admin/comm/email/test"); data.sent ? toast.success(`E-mail de test envoyé à ${data.to}`) : toast.error("Envoi échoué — vérifiez la configuration"); }
+  const remove = async (profile) => {
+    if (!window.confirm(`Supprimer le profil « ${profile.name} » ?`)) return;
+    try { await api.delete(`/admin/comm/email/profiles/${profile.id}`); await load(); toast.success("Profil e-mail supprimé"); }
     catch (e) { toast.error(apiErr(e)); }
   };
-  const stored = s.provider === "resend" ? s.has_resend_key : s.has_smtp_password;
+  const test = async (profile) => {
+    try {
+      const { data } = await api.post(`/admin/comm/email/profiles/${profile.id}/test`);
+      data.sent ? toast.success(`E-mail de test envoyé à ${data.to}`) : toast.error("Envoi échoué — vérifiez ce profil");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
   return (
-    <div className="bg-card border border-border rounded-xl p-5 space-y-3" data-testid="email-provider">
-      <div className="flex items-center justify-between">
-        <div className="font-display font-bold flex items-center gap-2"><Mail className="w-4 h-4 text-primary" /> API E-mail</div>
-        <label className="flex items-center gap-2 text-sm">Activée <Switch checked={!!s.enabled} onCheckedChange={(v) => set("enabled", v)} data-testid="email-enabled" /></label>
+    <div className="bg-card border border-border rounded-xl p-5 space-y-4" data-testid="email-provider">
+      <div className="font-display font-bold flex items-center gap-2"><Mail className="w-4 h-4 text-primary" /> Profils d'envoi e-mail</div>
+      <p className="text-xs text-muted-foreground">Enregistrez plusieurs profils SMTP ou Resend et affectez-les à leurs pays. Tous les profils actifs disponibles pour le pays du destinataire sont utilisés par défaut; vous pouvez choisir un ou plusieurs profils par pays et par modèle de message. Les identifiants sont chiffrés et ne sont jamais réaffichés.</p>
+      <div className="space-y-2">
+        {profiles.map((profile) => (
+          <div key={profile.id} className="flex flex-wrap items-center justify-between gap-3 border border-border rounded-lg p-3" data-testid={`email-profile-${profile.id}`}>
+            <div className="min-w-0">
+              <div className="font-medium text-sm">{profile.name} <span className="text-xs text-muted-foreground">· {profile.provider === "smtp" ? "SMTP" : "Resend"}</span></div>
+              <div className="text-xs text-muted-foreground">{profile.countries?.length ? profile.countries.join(", ") : "Tous les pays"} · {profile.from_email || "Expéditeur absent"} · {profile.provider === "smtp" ? `${profile.smtp_host || "Serveur absent"}:${profile.smtp_port} · ${profile.smtp_username || "Identifiant absent"} · mot de passe ${profile.has_smtp_password ? "enregistré" : "absent"}` : `clé API ${profile.has_resend_key ? "enregistrée" : "absente"}`}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-xs"><Switch checked={!!profile.enabled} onCheckedChange={(v) => updateEnabled(profile, v)} data-testid={`email-profile-enabled-${profile.id}`} /> Actif</label>
+              <Button size="sm" variant="outline" onClick={() => test(profile)} disabled={!profile.enabled} data-testid={`email-profile-test-${profile.id}`}><Send className="w-3.5 h-3.5 mr-1" /> Tester</Button>
+              <Button size="icon" variant="ghost" onClick={() => edit(profile)} data-testid={`email-profile-edit-${profile.id}`}><Pencil className="w-4 h-4" /></Button>
+              <Button size="icon" variant="ghost" className="text-destructive" onClick={() => remove(profile)} data-testid={`email-profile-delete-${profile.id}`}><Trash2 className="w-4 h-4" /></Button>
+            </div>
+          </div>
+        ))}
+        {profiles.length === 0 && <p className="text-sm text-muted-foreground">Aucun profil enregistré.</p>}
       </div>
-      <p className="text-xs text-muted-foreground">Tant qu'aucune API n'est activée, l'envoi par défaut de la plateforme est utilisé. Les clés sont chiffrées et ne sont jamais réaffichées.</p>
+      <div className="border-t border-border pt-3 space-y-3">
+        <div className="font-semibold text-sm">{editing ? "Modifier le profil" : "Ajouter un profil"}</div>
       <div className="grid md:grid-cols-2 gap-3">
+        <div className="md:col-span-2"><Label className="text-xs">Pays de service (vide = tous les pays)</Label><CountryPicker value={form.countries} onChange={(v) => set("countries", v)} countries={countries} testid="email-profile-countries" /></div>
+        <div><Label className="text-xs">Nom du profil</Label><Input className="mt-1" value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Ex. E-mail transactionnel" data-testid="email-profile-name" /></div>
         <div><Label className="text-xs">Fournisseur</Label>
-          <Select value={s.provider} onValueChange={(v) => set("provider", v)}>
+          <Select value={form.provider} onValueChange={(v) => set("provider", v)}>
             <SelectTrigger className="mt-1" data-testid="email-provider-type"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="none">Envoi par défaut</SelectItem><SelectItem value="resend">Resend (API)</SelectItem><SelectItem value="smtp">SMTP</SelectItem></SelectContent>
+            <SelectContent><SelectItem value="resend">Resend (API)</SelectItem><SelectItem value="smtp">SMTP</SelectItem></SelectContent>
           </Select>
         </div>
-        <div><Label className="text-xs">Adresse d'expédition</Label><Input className="mt-1" placeholder="AfriMarket <no-reply@votre-domaine.com>" value={s.from_email || ""} onChange={(e) => set("from_email", e.target.value)} data-testid="email-from" /></div>
-        {s.provider === "resend" && (
-          <div className="md:col-span-2"><Label className="text-xs">Clé API Resend</Label><Input className="mt-1" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={stored ? "Clé enregistrée (laisser vide pour conserver)" : "re_..."} data-testid="email-resend-key" /></div>
+        <div><Label className="text-xs">Adresse d'expédition</Label><Input className="mt-1" placeholder="AfriMarket <no-reply@votre-domaine.com>" value={form.from_email || ""} onChange={(e) => set("from_email", e.target.value)} data-testid="email-from" /></div>
+        {form.provider === "resend" && (
+          <div className="md:col-span-2"><Label className="text-xs">Clé API Resend</Label><Input className="mt-1" type="password" value={form.resend_api_key} onChange={(e) => set("resend_api_key", e.target.value)} placeholder={editing && profiles.find((p) => p.id === editing)?.has_resend_key ? "Clé enregistrée (laisser vide pour conserver)" : "re_..."} data-testid="email-resend-key" /></div>
         )}
-        {s.provider === "smtp" && (
+        {form.provider === "smtp" && (
           <>
-            <div><Label className="text-xs">Serveur SMTP</Label><Input className="mt-1" value={s.smtp_host || ""} onChange={(e) => set("smtp_host", e.target.value)} data-testid="email-smtp-host" /></div>
-            <div><Label className="text-xs">Port</Label><Input className="mt-1" type="number" value={s.smtp_port} onChange={(e) => set("smtp_port", parseInt(e.target.value || "587", 10))} data-testid="email-smtp-port" /></div>
-            <div><Label className="text-xs">Identifiant</Label><Input className="mt-1" value={s.smtp_username || ""} onChange={(e) => set("smtp_username", e.target.value)} data-testid="email-smtp-user" /></div>
-            <div><Label className="text-xs">Mot de passe</Label><Input className="mt-1" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={stored ? "Enregistré (laisser vide pour conserver)" : ""} data-testid="email-smtp-password" /></div>
-            <label className="flex items-center gap-2 text-sm"><Switch checked={!!s.smtp_starttls} onCheckedChange={(v) => set("smtp_starttls", v)} data-testid="email-smtp-tls" /> STARTTLS</label>
+            <div><Label className="text-xs">Serveur SMTP</Label><Input className="mt-1" value={form.smtp_host || ""} onChange={(e) => set("smtp_host", e.target.value)} data-testid="email-smtp-host" /></div>
+            <div><Label className="text-xs">Port</Label><Input className="mt-1" type="number" value={form.smtp_port} onChange={(e) => set("smtp_port", parseInt(e.target.value || "587", 10))} data-testid="email-smtp-port" /></div>
+            <div><Label className="text-xs">Identifiant</Label><Input className="mt-1" value={form.smtp_username || ""} onChange={(e) => set("smtp_username", e.target.value)} data-testid="email-smtp-user" /></div>
+            <div><Label className="text-xs">Mot de passe</Label><Input className="mt-1" type="password" value={form.smtp_password} onChange={(e) => set("smtp_password", e.target.value)} placeholder={editing && profiles.find((p) => p.id === editing)?.has_smtp_password ? "Enregistré (laisser vide pour conserver)" : ""} data-testid="email-smtp-password" /></div>
+            <label className="flex items-center gap-2 text-sm"><Switch checked={!!form.smtp_starttls} onCheckedChange={(v) => set("smtp_starttls", v)} data-testid="email-smtp-tls" /> STARTTLS</label>
           </>
         )}
       </div>
-      <div className="flex gap-2">
-        <Button className="rounded-full" onClick={save} data-testid="email-save">Enregistrer</Button>
-        <Button variant="outline" className="rounded-full" onClick={test} data-testid="email-test"><Send className="w-3.5 h-3.5 mr-1" /> Envoyer un test</Button>
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-2 text-sm"><Switch checked={!!form.enabled} onCheckedChange={(v) => set("enabled", v)} data-testid="email-profile-form-enabled" /> Profil actif</label>
+        <Button className="rounded-full" onClick={save} data-testid="email-save">{editing ? "Mettre à jour" : "Enregistrer le profil"}</Button>
+        {editing && <Button variant="outline" className="rounded-full" onClick={() => { setForm(empty); setEditing(""); }}>Annuler</Button>}
+      </div>
       </div>
     </div>
   );
@@ -342,15 +389,23 @@ export function SmsRelaysTab({ countries }) {
   );
 }
 
-function TemplateEditor({ t, onSaved }) {
+function TemplateEditor({ t, onSaved, emailProfiles, countries }) {
   const [lang, setLang] = useState("fr");
   const [c, setC] = useState(t.content);
-  useEffect(() => { setC(t.content); }, [t]);
+  const [profileMap, setProfileMap] = useState(t.email_provider_ids_by_country || {});
+  const [country, setCountry] = useState("");
+  useEffect(() => { setC(t.content); setProfileMap(t.email_provider_ids_by_country || {}); }, [t]);
+  useEffect(() => { if (!country && countries.length) setCountry(countries[0].name); }, [country, countries]);
   const save = async (patch) => {
     try { const { data } = await api.put(`/admin/comm/templates/${t.key}`, patch); onSaved(data.template); toast.success("Message enregistré"); }
     catch (e) { toast.error(apiErr(e)); }
   };
   const reset = async () => { try { const { data } = await api.post(`/admin/comm/templates/${t.key}/reset`); onSaved(data.template); toast.success("Message par défaut restauré"); } catch (e) { toast.error(apiErr(e)); } };
+  const assignedProfiles = emailProfiles.filter((profile) => profile.enabled && (!profile.countries?.length || profile.countries.includes(country)));
+  const savedForCountry = Object.prototype.hasOwnProperty.call(profileMap, country)
+    ? profileMap[country]
+    : (t.email_provider_ids || []);
+  const selectedForCountry = savedForCountry.filter((id) => assignedProfiles.some((profile) => profile.id === id));
   return (
     <div className="bg-card border border-border rounded-xl p-4 space-y-2" data-testid={`template-${t.key}`}>
       <div className="flex flex-wrap items-center gap-2 justify-between">
@@ -366,6 +421,37 @@ function TemplateEditor({ t, onSaved }) {
             </>
           )}
         </div>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Pays et profils utilisés pour cet e-mail</Label>
+        <p className="text-[11px] text-muted-foreground">Choisissez d’abord le pays. Seuls ses profils et les profils globaux sont proposés. Sans sélection, tous les profils actifs de ce pays sont utilisés.</p>
+        <Select value={country} onValueChange={setCountry}>
+          <SelectTrigger data-testid={`template-country-${t.key}`}><SelectValue placeholder="Sélectionner un pays" /></SelectTrigger>
+          <SelectContent className="max-h-64">{countries.map((item) => <SelectItem key={item.name} value={item.name}>{item.name}</SelectItem>)}</SelectContent>
+        </Select>
+        {!country
+          ? <p className="text-xs text-muted-foreground">Sélectionnez un pays pour afficher ses services disponibles.</p>
+          : assignedProfiles.length === 0
+          ? <p className="text-xs text-muted-foreground">Aucun profil actif disponible pour ce pays; l’envoi e-mail par défaut de la plateforme sera utilisé.</p>
+          : <div className="flex flex-wrap gap-3">
+            {assignedProfiles.map((profile) => (
+              <label key={profile.id} className="flex items-center gap-2 text-xs cursor-pointer">
+                <Checkbox
+                  checked={selectedForCountry.includes(profile.id)}
+                  onCheckedChange={(checked) => {
+                    const next = checked === true
+                      ? [...selectedForCountry, profile.id]
+                      : selectedForCountry.filter((id) => id !== profile.id);
+                    const nextMap = { ...profileMap, [country]: next };
+                    setProfileMap(nextMap);
+                    save({ email_provider_ids_by_country: nextMap });
+                  }}
+                  data-testid={`template-email-profile-${t.key}-${country}-${profile.id}`}
+                />
+                {profile.name}
+              </label>
+            ))}
+          </div>}
       </div>
       <div className="flex gap-1">
         {Object.keys(LANG_LABEL).map((l) => (
@@ -384,8 +470,14 @@ function TemplateEditor({ t, onSaved }) {
 
 export function TemplatesTab({ audiences }) {
   const [templates, setTemplates] = useState([]);
+  const [emailProfiles, setEmailProfiles] = useState([]);
+  const [countries, setCountries] = useState([]);
   const [aud, setAud] = useState(audiences[0][0]);
-  useEffect(() => { api.get("/admin/comm/templates").then((r) => setTemplates(r.data.templates)).catch(() => {}); }, []);
+  useEffect(() => {
+    api.get("/admin/comm/templates").then((r) => setTemplates(r.data.templates)).catch(() => {});
+    api.get("/admin/comm/email").then((r) => setEmailProfiles(r.data.profiles || [])).catch(() => {});
+    api.get("/config/countries").then((r) => setCountries(r.data.countries || [])).catch(() => {});
+  }, []);
   const onSaved = (nt) => setTemplates((ts) => ts.map((t) => (t.key === nt.key ? nt : t)));
   const list = templates.filter((t) => t.audience === aud);
   return (
@@ -400,7 +492,7 @@ export function TemplatesTab({ audiences }) {
           ))}
         </div>
       )}
-      {list.map((t) => <TemplateEditor key={t.key} t={t} onSaved={onSaved} />)}
+      {list.map((t) => <TemplateEditor key={t.key} t={t} onSaved={onSaved} emailProfiles={emailProfiles} countries={countries} />)}
     </div>
   );
 }

@@ -495,8 +495,10 @@ async def _create_otp_challenge(user: dict, channel: str) -> tuple:
 
 async def _deliver_otp(user: dict, channel: str, code: str):
     if channel == "email":
-        return await send_2fa_code(user["email"], code, user.get("language") or "fr", user.get("name", ""))
-    msg = await messaging.render("auth_otp", user.get("language") or "fr", {"code": code, "name": user.get("name", "")})
+        return await send_2fa_code(user["email"], code, user.get("language") or "fr",
+                                   user.get("name", ""), user.get("country"))
+    msg = await messaging.render("auth_otp", user.get("language") or "fr",
+                                 {"code": code, "name": user.get("name", "")}, user.get("country"))
     if not msg:
         return False
     status = await send_sms_like(channel, user.get("phone", ""), user.get("country", ""),
@@ -697,7 +699,8 @@ async def verify_phone(req: VerifyReq, user: dict = Depends(get_current_user)):
 async def resend_email(background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     code = str(random.randint(100000, 999999))
     await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"email_code": code}})
-    background_tasks.add_task(send_verification_email, user["email"], code, user.get("language") or "fr", user.get("name", ""))
+    background_tasks.add_task(send_verification_email, user["email"], code, user.get("language") or "fr",
+                              user.get("name", ""), user.get("country"))
     return {"message": "E-mail de vérification renvoyé"}
 
 
@@ -4167,7 +4170,7 @@ async def admin_get_settings(user: dict = Depends(require_module("settings"))):
 async def admin_put_settings(req: SettingsReq, request: Request, user: dict = Depends(require_module("settings"))):
     upd = {}
     if req.two_factor_scope is not None:
-        if req.two_factor_scope not in ("NONE", "STAFF", "ALL"):
+        if req.two_factor_scope not in ("NONE", "STAFF", "CLIENT_ONLY", "MERCHANT_ONLY", "ALL"):
             raise HTTPException(status_code=400, detail="Portée 2FA invalide")
         upd["two_factor_scope"] = req.two_factor_scope
     if req.two_factor_delivery_disabled is not None:
