@@ -115,14 +115,23 @@ function EmailProvider() {
 
 function CountryPicker({ value, onChange, countries, testid }) {
   return (
-    <div className="space-y-1">
-      <Select value="" onValueChange={(v) => !value.includes(v) && onChange([...value, v])}>
-        <SelectTrigger data-testid={testid}><SelectValue placeholder={value.length ? "Ajouter un pays" : "Pays (vide = tous)"} /></SelectTrigger>
-        <SelectContent className="max-h-64">{countries.map((c) => <SelectItem key={c.name} value={c.name}>{c.name}</SelectItem>)}</SelectContent>
-      </Select>
-      <div className="flex flex-wrap gap-1">
-        {value.map((c) => (
-          <button key={c} type="button" onClick={() => onChange(value.filter((x) => x !== c))} className="text-[11px] bg-accent px-2 py-0.5 rounded-full hover:bg-destructive/10" data-testid={`${testid}-chip-${c}`}>{c} ×</button>
+    <div className="max-h-48 overflow-y-auto rounded-md border border-border p-2" data-testid={testid}>
+      <label className="flex items-center gap-2 py-1 text-xs font-medium cursor-pointer">
+        <Checkbox checked={value.length === 0} onCheckedChange={(checked) => checked === true && onChange([])} data-testid={`${testid}-all`} />
+        Tous les pays
+      </label>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+        {countries.map((country) => (
+          <label key={country.name} className="flex items-center gap-2 py-1 text-xs cursor-pointer">
+            <Checkbox
+              checked={value.includes(country.name)}
+              onCheckedChange={(checked) => onChange(checked === true
+                ? [...value, country.name]
+                : value.filter((name) => name !== country.name))}
+              data-testid={`${testid}-${country.name}`}
+            />
+            {country.name}
+          </label>
         ))}
       </div>
     </div>
@@ -393,19 +402,32 @@ function TemplateEditor({ t, onSaved, emailProfiles, countries }) {
   const [lang, setLang] = useState("fr");
   const [c, setC] = useState(t.content);
   const [profileMap, setProfileMap] = useState(t.email_provider_ids_by_country || {});
-  const [country, setCountry] = useState("");
   useEffect(() => { setC(t.content); setProfileMap(t.email_provider_ids_by_country || {}); }, [t]);
-  useEffect(() => { if (!country && countries.length) setCountry(countries[0].name); }, [country, countries]);
   const save = async (patch) => {
     try { const { data } = await api.put(`/admin/comm/templates/${t.key}`, patch); onSaved(data.template); toast.success("Message enregistré"); }
     catch (e) { toast.error(apiErr(e)); }
   };
   const reset = async () => { try { const { data } = await api.post(`/admin/comm/templates/${t.key}/reset`); onSaved(data.template); toast.success("Message par défaut restauré"); } catch (e) { toast.error(apiErr(e)); } };
-  const assignedProfiles = emailProfiles.filter((profile) => profile.enabled && (!profile.countries?.length || profile.countries.includes(country)));
-  const savedForCountry = Object.prototype.hasOwnProperty.call(profileMap, country)
-    ? profileMap[country]
-    : (t.email_provider_ids || []);
-  const selectedForCountry = savedForCountry.filter((id) => assignedProfiles.some((profile) => profile.id === id));
+  const selectedCountries = countries.filter((item) => Object.prototype.hasOwnProperty.call(profileMap, item.name));
+  const updateCountry = (country, checked) => {
+    const nextMap = { ...profileMap };
+    if (checked) {
+      const eligibleIds = emailProfiles
+        .filter((profile) => profile.enabled && (!profile.countries?.length || profile.countries.includes(country)))
+        .filter((profile) => (t.email_provider_ids || []).includes(profile.id))
+        .map((profile) => profile.id);
+      nextMap[country] = eligibleIds;
+    }
+    else delete nextMap[country];
+    setProfileMap(nextMap);
+    save({ email_provider_ids_by_country: nextMap });
+  };
+  const updateCountryProfiles = (country, profileId, checked, selectedIds) => {
+    const next = checked ? [...selectedIds, profileId] : selectedIds.filter((id) => id !== profileId);
+    const nextMap = { ...profileMap, [country]: next };
+    setProfileMap(nextMap);
+    save({ email_provider_ids_by_country: nextMap });
+  };
   return (
     <div className="bg-card border border-border rounded-xl p-4 space-y-2" data-testid={`template-${t.key}`}>
       <div className="flex flex-wrap items-center gap-2 justify-between">
@@ -424,34 +446,45 @@ function TemplateEditor({ t, onSaved, emailProfiles, countries }) {
       </div>
       <div className="space-y-1">
         <Label className="text-xs">Pays et profils utilisés pour cet e-mail</Label>
-        <p className="text-[11px] text-muted-foreground">Choisissez d’abord le pays. Seuls ses profils et les profils globaux sont proposés. Sans sélection, tous les profils actifs de ce pays sont utilisés.</p>
-        <Select value={country} onValueChange={setCountry}>
-          <SelectTrigger data-testid={`template-country-${t.key}`}><SelectValue placeholder="Sélectionner un pays" /></SelectTrigger>
-          <SelectContent className="max-h-64">{countries.map((item) => <SelectItem key={item.name} value={item.name}>{item.name}</SelectItem>)}</SelectContent>
-        </Select>
-        {!country
-          ? <p className="text-xs text-muted-foreground">Sélectionnez un pays pour afficher ses services disponibles.</p>
-          : assignedProfiles.length === 0
-          ? <p className="text-xs text-muted-foreground">Aucun profil actif disponible pour ce pays; l’envoi e-mail par défaut de la plateforme sera utilisé.</p>
-          : <div className="flex flex-wrap gap-3">
-            {assignedProfiles.map((profile) => (
-              <label key={profile.id} className="flex items-center gap-2 text-xs cursor-pointer">
+        <p className="text-[11px] text-muted-foreground">Cochez un ou plusieurs pays, puis choisissez pour chacun un ou plusieurs services actifs. Seuls les profils affectés au pays (ou disponibles dans tous les pays) sont proposés. Les pays non cochés gardent le routage existant.</p>
+        <div className="max-h-48 overflow-y-auto rounded-md border border-border p-2" data-testid={`template-countries-${t.key}`}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+            {countries.map((item) => (
+              <label key={item.name} className="flex items-center gap-2 py-1 text-xs cursor-pointer">
                 <Checkbox
-                  checked={selectedForCountry.includes(profile.id)}
-                  onCheckedChange={(checked) => {
-                    const next = checked === true
-                      ? [...selectedForCountry, profile.id]
-                      : selectedForCountry.filter((id) => id !== profile.id);
-                    const nextMap = { ...profileMap, [country]: next };
-                    setProfileMap(nextMap);
-                    save({ email_provider_ids_by_country: nextMap });
-                  }}
-                  data-testid={`template-email-profile-${t.key}-${country}-${profile.id}`}
+                  checked={Object.prototype.hasOwnProperty.call(profileMap, item.name)}
+                  onCheckedChange={(checked) => updateCountry(item.name, checked === true)}
+                  data-testid={`template-country-${t.key}-${item.name}`}
                 />
-                {profile.name}
+                {item.name}
               </label>
             ))}
-          </div>}
+          </div>
+        </div>
+        {selectedCountries.map(({ name: country }) => {
+          const assignedProfiles = emailProfiles.filter((profile) => profile.enabled && (!profile.countries?.length || profile.countries.includes(country)));
+          const selectedForCountry = (profileMap[country] || []).filter((id) => assignedProfiles.some((profile) => profile.id === id));
+          return (
+            <div key={country} className="rounded-md border border-border p-2 space-y-2" data-testid={`template-country-services-${t.key}-${country}`}>
+              <div className="text-xs font-medium">{country}</div>
+              {assignedProfiles.length === 0
+                ? <p className="text-xs text-muted-foreground">Aucun profil actif disponible pour ce pays; l’envoi e-mail par défaut de la plateforme sera utilisé.</p>
+                : <div className="flex flex-wrap gap-x-4 gap-y-2">
+                  {assignedProfiles.map((profile) => (
+                    <label key={profile.id} className="flex items-center gap-2 text-xs cursor-pointer">
+                      <Checkbox
+                        checked={selectedForCountry.includes(profile.id)}
+                        onCheckedChange={(checked) => updateCountryProfiles(country, profile.id, checked === true, selectedForCountry)}
+                        data-testid={`template-email-profile-${t.key}-${country}-${profile.id}`}
+                      />
+                      {profile.name}
+                    </label>
+                  ))}
+                </div>}
+              <p className="text-[11px] text-muted-foreground">Si aucun service n’est coché, tous les services actifs éligibles sont utilisés.</p>
+            </div>
+          );
+        })}
       </div>
       <div className="flex gap-1">
         {Object.keys(LANG_LABEL).map((l) => (
