@@ -141,3 +141,63 @@ def test_rejects_redirect_to_another_domain(monkeypatch):
         supplier_import.fetch_supplier_page("https://www.aliexpress.com/item/123.html")
 
     assert calls == ["https://www.aliexpress.com/item/123.html"]
+
+
+def test_collects_all_gallery_description_images_and_variants():
+    page = {"@type": "Product", "name": "Montre", "image": "https://cdn.example.com/a.jpg_80x80.jpg"}
+    html = f"""
+      <script type="application/ld+json">{json.dumps(page)}</script>
+      <script>window.data = {{"imagePathList": ["https://cdn.example.com/a.jpg", "//cdn.example.com/b.jpg", "https://cdn.example.com/c.jpg"],
+        "skuPropertyList": [{{"skuPropertyValues": [
+          {{"propertyValueDisplayName": "Noir", "skuPropertyImagePath": "https://cdn.example.com/black.jpg"}},
+          {{"propertyValueDisplayName": "Rouge"}}]}}]}};</script>
+      <img src="https://cdn.example.com/not-in-description.jpg">
+      <div id="product-description"><p><img data-src="https://cdn.example.com/d1.jpg"></p><img src="https://cdn.example.com/d2.jpg"></div>
+      <img src="https://cdn.example.com/after.jpg">
+    """
+
+    product = supplier_import.parse_supplier_page(html.encode(), "https://www.aliexpress.com/item/1.html")["product"]
+
+    assert product["image"] == "https://cdn.example.com/a.jpg"
+    assert product["gallery"] == ["https://cdn.example.com/b.jpg", "https://cdn.example.com/c.jpg"]
+    assert product["description_images"] == ["https://cdn.example.com/d1.jpg", "https://cdn.example.com/d2.jpg"]
+    assert [v["label"] for v in product["variants"]] == ["Noir", "Rouge"]
+    assert product["variants"][0]["image"] == "https://cdn.example.com/black.jpg"
+
+
+def test_variant_type_comes_from_property_name():
+    html = """<script>var d = {"skuPropertyList": [
+      {"skuPropertyName": "Couleur", "skuPropertyValues": [{"propertyValueDisplayName": "Noir"}]},
+      {"skuPropertyName": "Taille", "skuPropertyValues": [{"propertyValueDisplayName": "M"}, {"propertyValueDisplayName": "L"}]}]};</script>
+      <meta property="og:type" content="product"><meta property="og:title" content="T-shirt">"""
+
+    product = supplier_import.parse_supplier_page(html.encode(), "https://www.aliexpress.com/item/2.html")["product"]
+
+    assert [(v["label"], v["type"]) for v in product["variants"]] == [("Noir / M", "Couleur / Taille"), ("Noir / L", "Couleur / Taille")]
+
+
+def test_download_image_accepts_real_images_only(monkeypatch):
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 4096
+
+    class FakeResponse:
+        is_redirect = is_permanent_redirect = False
+        status_code = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def iter_content(self, chunk_size):
+            yield self.body
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(None, None, None, None, ("93.184.216.34", 443))])
+    monkeypatch.setattr(supplier_import.requests, "get", lambda *a, **k: FakeResponse(png))
+    assert supplier_import.download_image("https://cdn.example.com/a.png") == (png, "image/png", "png")
+
+    monkeypatch.setattr(supplier_import.requests, "get", lambda *a, **k: FakeResponse(b"<html>" + b"0" * 4096))
+    assert supplier_import.download_image("https://cdn.example.com/a.png") is None
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(None, None, None, None, ("10.0.0.1", 443))])
+    assert supplier_import.download_image("https://cdn.example.com/a.png") is None

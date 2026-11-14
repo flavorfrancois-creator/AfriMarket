@@ -32,7 +32,7 @@ import {
 import {
   Home, Store, Users, ShoppingCart, Banknote, Globe, FileText, TrendingUp, Package,
   CheckCircle2, XCircle, ShieldCheck, ShieldAlert, UserCog, ScrollText, Trash2, KeyRound, Truck, Clock,
-  BarChart3, Download, Calendar as CalendarIcon, Trophy, MapPin, FolderTree, UserX, User as UserIcon,
+  BarChart3, Download, Calendar as CalendarIcon, Trophy, MapPin, FolderTree, UserX, User as UserIcon, Eye,
 } from "lucide-react";
 
 const ROLE_LABELS = {
@@ -1631,10 +1631,14 @@ export function AdminProducts() {
                   <TableCell className="text-sm">{p.shop_name}</TableCell>
                   <TableCell className="text-right font-mono text-sm">{money(p.price_simple, p.currency)}</TableCell>
                   <TableCell className="text-sm">{p.report_count || 0}</TableCell>
-                  <TableCell><StatusBadge status={p.moderation_status || "APPROVED"} /></TableCell>
                   <TableCell>
-                    {p.moderation_status !== "APPROVED" && <Button size="sm" className="rounded-full mr-1" onClick={() => approve(p)} data-testid={`approve-product-${p.id}`}><CheckCircle2 className="w-4 h-4 mr-1" /> Valider</Button>}
-                    {p.moderation_status !== "REJECTED" && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => { setReject(p); setReason(""); }} data-testid={`reject-product-${p.id}`}><XCircle className="w-4 h-4" /></Button>}
+                    <StatusBadge status={p.has_pending_update ? "PENDING" : (p.moderation_status || "APPROVED")} />
+                    {p.has_pending_update && <span className="block text-[10px] text-muted-foreground mt-1">Version en attente</span>}
+                  </TableCell>
+                  <TableCell>
+                    {(p.moderation_status !== "APPROVED" || p.has_pending_update) && <Button size="sm" className="rounded-full mr-1" onClick={() => approve(p)} data-testid={`approve-product-${p.id}`}><CheckCircle2 className="w-4 h-4 mr-1" /> Valider</Button>}
+                    {<Button size="sm" variant="outline" className="rounded-full mr-1" onClick={() => window.open(`/products/${p.id}?preview=pending`, "_blank", "noopener,noreferrer")} data-testid={`preview-product-${p.id}`}><Eye className="w-4 h-4 mr-1" /> Aperçu</Button>}
+                    {(p.moderation_status !== "REJECTED" || p.has_pending_update) && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => { setReject(p); setReason(""); }} data-testid={`reject-product-${p.id}`}><XCircle className="w-4 h-4" /></Button>}
                   </TableCell>
                 </TableRow>
               ))}

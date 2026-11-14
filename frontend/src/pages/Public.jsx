@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Trash2, Store, Minus, Plus, ShoppingCart, MapPin, Flag } from "lucide-react";
+import { Trash2, Store, Minus, Plus, ShoppingCart, MapPin, Flag, MessageCircle, Share2 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
 export function Products() {
@@ -146,6 +146,7 @@ const TYPE_LABEL = { SIMPLE: "Client Simple", PARTENAIRE: "Partenaire", PROFESSI
 
 export function ProductDetail() {
   const { id } = useParams();
+  const [params] = useSearchParams();
   const { add } = useCart();
   const { user } = useAuth();
   const { fmt: money, target } = useFx();
@@ -157,10 +158,15 @@ export function ProductDetail() {
   const [reportOpen, setReportOpen] = useState(false);
   const [reportReason, setReportReason] = useState("Contrefaçon");
   const [reportComment, setReportComment] = useState("");
+  const preview = params.get("preview") === "pending";
   useEffect(() => {
+    if (preview) {
+      api.get(`/admin/products/${id}/preview`).then((r) => setData(r.data)).catch(() => setData(false));
+      return;
+    }
     const params = active ? { for_client: true } : {};
     api.get(`/products/${id}`, { params }).then((r) => setData(r.data)).catch(() => setData(false));
-  }, [id, active]);
+  }, [id, active, preview]);
   const submitReport = async () => {
     try {
       await api.post(`/products/${id}/report`, { reason: reportReason, comment: reportComment });
@@ -174,17 +180,26 @@ export function ProductDetail() {
   const hasVariants = (p.variants || []).length > 0;
   const PF = { SIMPLE: "price_simple", PARTENAIRE: "price_partner", PROFESSIONNEL: "price_pro", ENTREPRISE: "price_enterprise" };
   const vprice = (v) => (active ? Number(v.price_simple || 0) : Number(v[PF[p.viewer_type]] ?? v.price_simple ?? 0));
-  const selVar = hasVariants ? (p.variants.find((v) => v.id === sel) || null) : null;
+  const selVar = hasVariants ? (p.variants.find((v) => v.id === (sel || params.get("variant"))) || null) : null;
   const gallery = [p.image, ...((p.gallery) || [])].filter(Boolean);
   const heroImg = mainImg || (selVar && selVar.image) || gallery[0] || "";
   const dispStock = selVar ? selVar.stock : p.stock;
   const canAdd = hasVariants ? !!(selVar && dispStock > 0) : p.stock > 0;
   const minVariantPrice = hasVariants ? Math.min(...p.variants.map((v) => vprice(v))) : 0;
   const doAdd = () => {
+    if (preview) return;
     if (hasVariants) {
       if (!selVar) { toast.error("Veuillez choisir une variante"); return; }
       add(p, qty, { id: selVar.id, label: selVar.label, image: selVar.image || p.image, price: vprice(selVar), price_simple: Number(selVar.price_simple || 0) });
     } else add(p, qty);
+  };
+  const shareUrl = `${window.location.origin}/products/${p.id}${selVar ? `?variant=${encodeURIComponent(selVar.id)}` : ""}`;
+  const shareText = `${p.name}${selVar ? ` — ${selVar.label}` : ""}`;
+  const openShare = (channel) => {
+    const url = channel === "whatsapp"
+      ? `https://wa.me/?text=${encodeURIComponent(`${shareText}\n${shareUrl}`)}`
+      : `https://www.tiktok.com/share?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
   };
   return (
     <div className="max-w-7xl mx-auto px-4 py-10 grid grid-cols-1 lg:grid-cols-2 gap-10">
@@ -209,6 +224,7 @@ export function ProductDetail() {
         )}
       </div>
       <div>
+        {preview && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900" data-testid="pending-product-preview">Aperçu administrateur — cette version n’est pas encore en ligne.</div>}
         <Link to={`/shops/${p.shop_id}`} className="text-sm text-primary flex items-center gap-1 mb-2"><Store className="w-4 h-4" />{p.shop_name}</Link>
         <h1 className="text-2xl md:text-3xl font-display font-extrabold">{p.name}</h1>
         {p.short_description && <p className="text-muted-foreground mt-2">{p.short_description}</p>}
@@ -258,6 +274,13 @@ export function ProductDetail() {
           </div>
         )}
 
+        {selVar && (selVar.type || selVar.description) && (
+          <div className="mt-3 text-sm text-muted-foreground" data-testid="detail-variant-info">
+            {selVar.type && <div><span className="font-semibold">{selVar.type} :</span> {selVar.label}</div>}
+            {selVar.description && <p className="mt-1 whitespace-pre-line">{selVar.description}</p>}
+          </div>
+        )}
+
         <div className="mt-4 text-sm text-muted-foreground">
           Stock : <span className={`font-semibold ${dispStock > 0 ? "text-green-600" : "text-red-600"}`}>{dispStock > 0 ? `${dispStock} disponibles` : "Rupture"}</span> · SKU : <span className="font-mono">{(selVar && selVar.sku) || p.sku}</span>
         </div>
@@ -268,19 +291,30 @@ export function ProductDetail() {
             <span className="w-10 text-center font-mono font-semibold">{qty}</span>
             <Button variant="ghost" size="icon" className="rounded-full" onClick={() => setQty(qty + 1)}><Plus className="w-4 h-4" /></Button>
           </div>
-          <Button className="rounded-full flex-1 h-12" disabled={!canAdd} onClick={doAdd} data-testid="detail-add-cart">
+          <Button className="rounded-full flex-1 h-12" disabled={preview || !canAdd} onClick={doAdd} data-testid="detail-add-cart">
             <ShoppingCart className="w-4 h-4 mr-2" /> {hasVariants && !selVar ? "Choisir une variante" : "Ajouter au panier"}
           </Button>
         </div>
+        <div className="mt-3 flex flex-wrap gap-2" data-testid="product-share-links">
+          <Button variant="outline" size="sm" className="rounded-full" onClick={() => openShare("whatsapp")} data-testid="share-whatsapp">
+            <MessageCircle className="w-4 h-4 mr-1" /> WhatsApp
+          </Button>
+          <Button variant="outline" size="sm" className="rounded-full" onClick={() => openShare("tiktok")} data-testid="share-tiktok">
+            <Share2 className="w-4 h-4 mr-1" /> TikTok
+          </Button>
+        </div>
 
-        {p.description && (
+        {(p.description || (p.description_images || []).length > 0) && (
           <div className="mt-8">
             <h3 className="font-display font-bold mb-2">Description</h3>
-            <p className="text-sm text-muted-foreground whitespace-pre-line">{p.description}</p>
+            {p.description && <p className="text-sm text-muted-foreground whitespace-pre-line">{p.description}</p>}
+            <div className="mt-3 space-y-2">
+              {(p.description_images || []).map((url, idx) => <img key={url + idx} src={url} alt="" loading="lazy" className="w-full rounded-lg" data-testid={`desc-image-${idx}`} />)}
+            </div>
           </div>
         )}
 
-        {user && (
+        {user && !preview && (
           <button className="mt-6 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive transition-colors" onClick={() => setReportOpen(true)} data-testid="report-product-btn">
             <Flag className="w-3.5 h-3.5" /> Signaler ce produit
           </button>

@@ -15,6 +15,14 @@ _VENDOR_ROOTS = ("aliexpress.com", "alibaba.com")
 _PRODUCT_PATH = re.compile(r"/(?:item/\d+|product-detail/[^/?#]+|product/[^/?#]+)", re.I)
 _MAX_PAGE_BYTES = 4 * 1024 * 1024
 _MAX_REDIRECTS = 3
+_MAX_GALLERY = 20
+_MAX_DESCRIPTION_IMAGES = 40
+_MAX_VARIANTS = 50
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+_DESC_MARK = re.compile(r"desc", re.I)
+_THUMB_SUFFIX = re.compile(r"(\.(?:jpe?g|png|webp))_[0-9]+x[0-9]+[^/]*$", re.I)
+_IMAGE_LIST_KEYS = ("imagePathList", "imageList", "imageUrls", "productImages")
+_DESC_IMAGE_KEYS = ("descriptionImages", "descImages", "detailImages")
 
 
 class SupplierPageError(ValueError):
@@ -70,10 +78,22 @@ class _PageParser(HTMLParser):
         self._script_parts = []
         self._in_title = False
         self._title_parts = []
+        self.scripts = []
+        self.desc_images = []
+        self._stack = []
+        self._desc_depth = None
 
     def handle_starttag(self, tag, attrs):
         attrs = {key.lower(): value for key, value in attrs if key}
         tag = tag.lower()
+        if tag not in _VOID_TAGS:
+            self._stack.append(tag)
+            if self._desc_depth is None and _DESC_MARK.search((attrs.get("id") or "") + " " + (attrs.get("class") or "")):
+                self._desc_depth = len(self._stack)
+        if tag == "img" and self._desc_depth is not None:
+            src = attrs.get("data-src") or attrs.get("data-lazy-src") or attrs.get("data-original") or attrs.get("src")
+            if src and not src.startswith("data:"):
+                self.desc_images.append(src)
         if tag == "meta":
             key = (attrs.get("property") or attrs.get("name") or attrs.get("itemprop") or "").lower()
             if key and attrs.get("content"):
@@ -97,18 +117,26 @@ class _PageParser(HTMLParser):
 
     def handle_endtag(self, tag):
         tag = tag.lower()
+        if tag in self._stack:
+            while self._stack:
+                if self._stack.pop() == tag:
+                    break
+            if self._desc_depth is not None and len(self._stack) < self._desc_depth:
+                self._desc_depth = None
         if tag == "script" and self._script_depth:
             self._script_depth -= 1
             if self._script_depth == 0:
                 if "ld+json" in self._script_type and self._script_parts:
                     self.jsonld.append("".join(self._script_parts))
+                elif "ld+json" not in self._script_type and self._script_parts:
+                    self.scripts.append("".join(self._script_parts))
                 self._script_type = ""
                 self._script_parts = []
         elif tag == "title":
             self._in_title = False
 
     def handle_data(self, data):
-        if self._script_depth and self._script_type:
+        if self._script_depth:
             self._script_parts.append(data)
         if self._in_title:
             self._title_parts.append(data)
@@ -141,7 +169,7 @@ def _text(value) -> str:
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]*>", " ", str(value)))).strip()
 
 
-def _images(value, base_url: str):
+def _images(value, base_url: str, limit: int = _MAX_GALLERY):
     values = value if isinstance(value, list) else [value]
     result = []
     for item in values:
@@ -149,13 +177,106 @@ def _images(value, base_url: str):
             item = item.get("url") or item.get("contentUrl")
         if not isinstance(item, str):
             continue
-        url = urljoin(base_url, item.strip())
+        url = _THUMB_SUFFIX.sub(r"\1", urljoin(base_url, item.strip()))
         parsed = urlsplit(url)
-        if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password and url not in result:
+        if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password and len(url) <= 2048 and url not in result:
             result.append(url)
-        if len(result) >= 20:
+        if len(result) >= limit:
             break
     return result
+
+
+def _embedded_values(scripts, keys):
+    """Yield JSON values stored under any of the given keys in inline page scripts."""
+    decoder = json.JSONDecoder()
+    pattern = re.compile(r'"(?:%s)"\s*:\s*' % "|".join(re.escape(key) for key in keys))
+    for script in scripts:
+        for match in pattern.finditer(script):
+            try:
+                value, _ = decoder.raw_decode(script, match.end())
+            except ValueError:
+                continue
+            yield value
+
+
+def _variants_from_page(node: dict, scripts, base_url: str, default_currency: str):
+    variants = []
+
+    def add(label, image=None, price=None, currency="", sku="", description="", kind=""):
+        label = _text(label)[:100]
+        if not label or any(v["label"] == label for v in variants) or len(variants) >= _MAX_VARIANTS:
+            return
+        try:
+            price = round(float(str(price).replace(",", ".")), 2) if price is not None else None
+            if price is not None and (not math.isfinite(price) or price <= 0):
+                price = None
+        except (TypeError, ValueError):
+            price = None
+        variants.append({
+            "label": label,
+            "image": (_images(image, base_url, 1) or [""])[0],
+            "sku": _text(sku)[:100],
+            "type": _text(kind)[:100],
+            "description": _text(description)[:1000],
+            "source_price": price,
+            "source_currency": str(currency or default_currency)[:8].upper(),
+        })
+
+    for entry in _flatten_jsonld(node.get("hasVariant") or []):
+        offer = entry.get("offers") or {}
+        offer = offer[0] if isinstance(offer, list) and offer else offer
+        offer = offer if isinstance(offer, dict) else {}
+        add(entry.get("name"), entry.get("image"), offer.get("price") or offer.get("lowPrice"),
+            offer.get("priceCurrency"), entry.get("sku"), entry.get("description"))
+    offers = node.get("offers")
+    if not variants and isinstance(offers, list) and len(offers) > 1:
+        for offer in offers:
+            if isinstance(offer, dict):
+                add(offer.get("name") or offer.get("sku"), offer.get("image"), offer.get("price") or offer.get("lowPrice"),
+                    offer.get("priceCurrency"), offer.get("sku"))
+
+    if not variants:
+        for properties in _embedded_values(scripts, ("skuPropertyList",)):
+            if not isinstance(properties, list):
+                continue
+            groups = []
+            names = []
+            for prop in properties:
+                values = prop.get("skuPropertyValues") if isinstance(prop, dict) else None
+                if isinstance(values, list):
+                    names.append(_text(prop.get("skuPropertyName")))
+                    groups.append([
+                        (_text(v.get("propertyValueDisplayName") or v.get("propertyValueName")),
+                         v.get("skuPropertyImagePath") or v.get("skuPropertyImageSummPath"))
+                        for v in values if isinstance(v, dict)
+                    ])
+            combos = [("", None)]
+            for group in groups:
+                combos = [((f"{a} / {b}" if a else b), image or img) for a, image in combos for b, img in group][:_MAX_VARIANTS]
+            kind = " / ".join(name for name in names if name)
+            for label, image in combos:
+                add(label, image, kind=kind)
+            if variants:
+                break
+    return variants
+
+
+def _product_images(node, parser, page_url: str):
+    images = _images(node.get("image"), page_url)
+    sources = [_images(parser.meta.get("og:image"), page_url)]
+    for value in _embedded_values(parser.scripts, _IMAGE_LIST_KEYS):
+        sources.append(_images(value if isinstance(value, list) else [], page_url))
+    for extra in sources:
+        images.extend(image for image in extra if image not in images)
+    return images[:_MAX_GALLERY]
+
+
+def _description_images(parser, page_url: str, exclude):
+    found = list(parser.desc_images)
+    for value in _embedded_values(parser.scripts, _DESC_IMAGE_KEYS):
+        if isinstance(value, list):
+            found.extend(v for v in value if isinstance(v, str))
+    return [image for image in _images(found, page_url, _MAX_DESCRIPTION_IMAGES) if image not in exclude]
 
 
 def _product_from_page(parser: _PageParser, page_url: str):
@@ -169,12 +290,7 @@ def _product_from_page(parser: _PageParser, page_url: str):
     node = nodes[0] if nodes else {}
     title = _text(node.get("name")) or _text(parser.meta.get("og:title")) or _text(parser._title_parts)
     description = _text(node.get("description")) or _text(parser.meta.get("og:description"))
-    image_values = _images(node.get("image"), page_url)
-    image_values.extend(
-        image for image in _images(parser.meta.get("og:image"), page_url) if image not in image_values
-    )
-    if len(image_values) > 20:
-        image_values = image_values[:20]
+    image_values = _product_images(node, parser, page_url)
 
     offers = node.get("offers") or {}
     if isinstance(offers, list):
@@ -198,6 +314,8 @@ def _product_from_page(parser: _PageParser, page_url: str):
             "description": description[:10000],
             "image": image_values[0] if image_values else "",
             "gallery": image_values[1:],
+            "description_images": _description_images(parser, page_url, image_values),
+            "variants": _variants_from_page(node, parser.scripts, page_url, str(currency)),
             "sku": _text(node.get("sku"))[:100],
             "source_price": price,
             "source_currency": str(currency)[:8].upper(),
@@ -266,3 +384,64 @@ def fetch_supplier_page(url: str, expected_root: str = None):
         finally:
             response.close()
     raise SupplierPageError("Trop de redirections sur la page fournisseur.")
+
+
+_IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", "image/jpeg", "jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
+    (b"GIF87a", "image/gif", "gif"),
+    (b"GIF89a", "image/gif", "gif"),
+)
+MAX_IMAGE_BYTES = 6 * 1024 * 1024
+_MIN_IMAGE_BYTES = 2048
+
+
+def _sniff_image(data: bytes):
+    for signature, content_type, ext in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return content_type, ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return None
+
+
+def download_image(url: str):
+    """Download a public HTTPS image; return (bytes, content_type, ext) or None when unusable."""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if parsed.scheme != "https" or not host or parsed.username or parsed.password or parsed.port not in (None, 443):
+            return None
+        current = url
+        for _ in range(_MAX_REDIRECTS + 1):
+            host = urlsplit(current).hostname
+            addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+                return None
+            response = requests.get(current, headers={"User-Agent": "AfriMarketProductImporter/1.0"},
+                                    timeout=(5, 15), allow_redirects=False, stream=True)
+            try:
+                if response.is_redirect or response.is_permanent_redirect:
+                    location = urljoin(current, response.headers.get("Location") or "")
+                    if urlsplit(location).scheme != "https":
+                        return None
+                    current = location
+                    continue
+                if response.status_code != 200:
+                    return None
+                chunks, total = [], 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    total += len(chunk)
+                    if total > MAX_IMAGE_BYTES:
+                        return None
+                    chunks.append(chunk)
+                data = b"".join(chunks)
+            finally:
+                response.close()
+            kind = _sniff_image(data)
+            if not kind or len(data) < _MIN_IMAGE_BYTES:
+                return None
+            return data, kind[0], kind[1]
+    except (OSError, ValueError, requests.RequestException):
+        return None
+    return None

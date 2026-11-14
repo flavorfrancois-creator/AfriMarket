@@ -56,3 +56,14 @@ def get_object(path: str):
         resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
     resp.raise_for_status()
     return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+
+
+def delete_object(path: str) -> bool:
+    """Best-effort removal of a stored object; returns False when the storage refuses or is unreachable."""
+    try:
+        key = init_storage()
+        resp = requests.delete(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=30)
+        return resp.status_code in (200, 202, 204, 404)
+    except requests.RequestException as exc:
+        logger.warning("storage delete failed for %s: %s", path, exc)
+        return False

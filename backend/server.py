@@ -7,6 +7,7 @@ import hashlib
 import secrets
 import random
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from urllib.parse import urlsplit
@@ -40,7 +41,7 @@ import payapis
 import accounts
 import categories
 import sms_relay
-from supplier_import import SupplierPageError, fetch_supplier_page, validate_supplier_url
+from supplier_import import SupplierPageError, fetch_supplier_page, validate_supplier_url, download_image, _sniff_image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -252,6 +253,7 @@ class ProductReq(BaseModel):
     description: Optional[str] = ""
     image: Optional[str] = ""
     gallery: List[str] = []
+    description_images: List[str] = []
     category: Optional[str] = ""
     subcategory: Optional[str] = ""
     genre: Optional[str] = ""
@@ -281,6 +283,8 @@ class SupplierImportItemReq(BaseModel):
     description: Optional[str] = None
     image: Optional[str] = None
     gallery: Optional[List[str]] = None
+    description_images: Optional[List[str]] = None
+    variants: Optional[List[dict]] = None
     category: Optional[str] = None
     subcategory: Optional[str] = None
     stock: Optional[int] = None
@@ -1102,8 +1106,9 @@ def _img_bytes(s: str) -> int:
     return len(s.encode("utf-8"))
 
 
-def _product_img_bytes(image: str, gallery: list) -> int:
-    return _img_bytes(image or "") + sum(_img_bytes(g) for g in (gallery or []))
+def _product_img_bytes(image: str, gallery: list, description_images: list = None) -> int:
+    return (_img_bytes(image or "") + sum(_img_bytes(g) for g in (gallery or []))
+            + sum(_img_bytes(g) for g in (description_images or [])))
 
 
 async def _shop_storage_bytes(shop_id: str, exclude_product_id: str = None) -> int:
@@ -1111,10 +1116,10 @@ async def _shop_storage_bytes(shop_id: str, exclude_product_id: str = None) -> i
     shop = await db.shops.find_one({"id": shop_id}, {"homepage_images": 1})
     total += sum(_img_bytes(image) for image in (shop or {}).get("homepage_images", []))
     async for p in db.products.find({"shop_id": shop_id, "status": {"$ne": "DELETED"}},
-                                    {"image": 1, "gallery": 1, "id": 1}):
+                                    {"image": 1, "gallery": 1, "description_images": 1, "id": 1}):
         if exclude_product_id and p.get("id") == exclude_product_id:
             continue
-        total += _product_img_bytes(p.get("image", ""), p.get("gallery", []))
+        total += _product_img_bytes(p.get("image", ""), p.get("gallery", []), p.get("description_images", []))
     return total
 
 
@@ -1306,6 +1311,8 @@ def _normalize_variants(variants):
             "id": v.get("id") or new_id(),
             "label": str(v.get("label", "")).strip(),
             "attributes": v.get("attributes") or {},
+            "type": str(v.get("type", "") or "").strip()[:100],
+            "description": str(v.get("description", "") or "").strip()[:1000],
             "sku": (v.get("sku") or gen_sku()),
             "stock": max(0, int(v.get("stock", 0) or 0)),
             "sold": max(0, int(v.get("sold", 0) or 0)),
@@ -1335,7 +1342,7 @@ async def create_product(req: ProductReq, user: dict = Depends(require_roles("ME
     storage_quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
     if storage_quota_mb > 0:
         used = await _shop_storage_bytes(shop["id"])
-        new_bytes = _product_img_bytes(req.image, req.gallery)
+        new_bytes = _product_img_bytes(req.image, req.gallery, req.description_images)
         if used + new_bytes > storage_quota_mb * 1024 * 1024:
             raise HTTPException(status_code=403, detail=f"Quota de stockage atteint ({storage_quota_mb} Mo). Réduisez le poids des images ou contactez l'administrateur.")
     data = req.model_dump()
@@ -1373,7 +1380,7 @@ async def my_products(user: dict = Depends(require_roles("MERCHANT"))):
     if not shop:
         return {"products": []}
     products = await db.products.find({"shop_id": shop["id"], "status": {"$ne": "DELETED"}}).to_list(500)
-    return {"products": [serialize(p) for p in products]}
+    return {"products": [_merchant_product_view(p) for p in products]}
 
 
 @api.put("/products/{product_id}")
@@ -1387,22 +1394,29 @@ async def update_product(product_id: str, req: ProductReq, user: dict = Depends(
     storage_quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
     if storage_quota_mb > 0:
         used_excl = await _shop_storage_bytes(shop["id"], exclude_product_id=product_id)
-        new_bytes = _product_img_bytes(req.image, req.gallery)
+        new_bytes = _product_img_bytes(req.image, req.gallery, req.description_images)
         if used_excl + new_bytes > storage_quota_mb * 1024 * 1024:
             raise HTTPException(status_code=403, detail=f"Quota de stockage atteint ({storage_quota_mb} Mo). Réduisez le poids des images.")
-    old_prices = {k: product.get(k) for k in ("price_simple", "price_partner", "price_pro", "price_enterprise")}
     upd = req.model_dump()
     upd["variants"] = _normalize_variants(upd.get("variants"))
     if upd["variants"]:
         upd["stock"] = sum(v["stock"] for v in upd["variants"])
-    upd["moderation_status"] = "PENDING"
-    upd["moderation_reason"] = ""
-    upd["daily_offer.status"] = "EXPIRED"
-    await db.products.update_one({"id": product_id}, {"$set": upd})
+    old_prices = {k: product.get(k) for k in ("price_simple", "price_partner", "price_pro", "price_enterprise")}
+    if product.get("moderation_status") == "APPROVED":
+        await db.products.update_one({"id": product_id}, {"$set": {
+            "pending_update": upd, "pending_update_at": now_iso(), "pending_update_reason": "",
+        }})
+        message = "Modification envoyée en modération. La version actuellement approuvée reste en ligne."
+    else:
+        upd["moderation_status"] = "PENDING"
+        upd["moderation_reason"] = ""
+        upd["daily_offer.status"] = "EXPIRED"
+        await db.products.update_one({"id": product_id}, {"$set": upd})
+        message = "Article mis à jour (en attente de modération)"
     await audit_log(user, "UPDATE_PRODUCT", "product", product_id, old_prices, {"price_simple": req.price_simple})
     await _notify_moderators("PRODUCT_MODERATION", "Produit modifié à revalider",
                              f"Le produit « {product['name']} » a été modifié et attend une nouvelle validation.", "/admin/products")
-    return {"message": "Article mis à jour (en attente de modération)"}
+    return {"message": message}
 
 
 @api.delete("/products/{product_id}")
@@ -1412,6 +1426,8 @@ async def delete_product(product_id: str, user: dict = Depends(require_roles("ME
     if not product or not shop or product["shop_id"] != shop["id"]:
         raise HTTPException(status_code=403, detail="Accès refusé")
     await db.products.update_one({"id": product_id}, {"$set": {"status": "DELETED"}})
+    await _purge_files([_file_path_from_url(url) for url in _product_image_urls(product)], user["id"],
+                       keep_used_by_other_products=product_id)
     await audit_log(user, "DELETE_PRODUCT", "product", product_id, product["name"], None)
     return {"message": "Article supprimé"}
 
@@ -1480,9 +1496,32 @@ def _daily_offer_price(offer: dict, base_price: float) -> Optional[float]:
     return None
 
 
+def _pending_product_view(product: dict) -> dict:
+    """Return the candidate replacement without ever changing the approved document."""
+    candidate = dict(product)
+    candidate.update(product.get("pending_update") or {})
+    candidate.pop("pending_update", None)
+    candidate.pop("pending_update_at", None)
+    candidate.pop("pending_update_reason", None)
+    return candidate
+
+
+def _merchant_product_view(product: dict) -> dict:
+    """A merchant edits the submitted candidate, while customers retain the approved version."""
+    view = serialize(_pending_product_view(product))
+    if product.get("pending_update"):
+        view["moderation_status"] = "PENDING_UPDATE"
+        view["approved_version_online"] = True
+    return view
+
+
 def _public_product(product: dict, ctype: str) -> dict:
     """Public payload: expose only the simple price and the viewer's own price."""
     p = serialize(product)
+    # A submitted replacement is strictly for the merchant and moderators.
+    # The approved document remains the only customer-visible version.
+    for k in ("pending_update", "pending_update_at", "pending_update_reason"):
+        p.pop(k, None)
     for k in ("price_partner", "price_pro", "price_enterprise"):
         p.pop(k, None)
     offer = product.get("daily_offer") or {}
@@ -2040,6 +2079,104 @@ async def _owned_supplier_import(import_id: str, user: dict):
     return session, shop
 
 
+_FILES_MARK = "/api/files/"
+
+
+def _public_file_url(path: str) -> str:
+    return f"{os.environ.get('PUBLIC_BACKEND_URL', '').rstrip('/')}{_FILES_MARK}{path}"
+
+
+def _file_path_from_url(url) -> Optional[str]:
+    if isinstance(url, str) and _FILES_MARK in url:
+        return url.split(_FILES_MARK, 1)[1].split("?", 1)[0] or None
+    return None
+
+
+def _product_image_urls(doc: dict) -> list:
+    urls = [doc.get("image") or ""] + list(doc.get("gallery") or []) + list(doc.get("description_images") or [])
+    urls += [v.get("image") or "" for v in doc.get("variants") or [] if isinstance(v, dict)]
+    pending = doc.get("pending_update")
+    if isinstance(pending, dict):
+        urls += _product_image_urls(pending)
+    return [u for u in urls if u]
+
+
+async def _purge_files(paths, owner_id: str, keep_used_by_other_products: str = None):
+    """Mark stored files deleted and remove them from object storage. Only the owner's files are touched."""
+    for path in {p for p in paths if p}:
+        record = await db.files.find_one({"storage_path": path, "owner_id": owner_id, "is_deleted": False})
+        if not record:
+            continue
+        if keep_used_by_other_products:
+            pattern = {"$regex": re.escape(path) + "$"}
+            if await db.products.count_documents({
+                "id": {"$ne": keep_used_by_other_products}, "status": {"$ne": "DELETED"},
+                "$or": [{"image": pattern}, {"gallery": pattern}, {"description_images": pattern}, {"variants.image": pattern}],
+            }):
+                continue
+        await db.files.update_one({"id": record["id"]}, {"$set": {"is_deleted": True, "deleted_at": now_iso()}})
+        await asyncio.to_thread(storage.delete_object, path)
+
+
+async def _store_import_image(data: bytes, content_type: str, ext: str, owner_id: str, import_id: str,
+                              item_id: str, filename: str = "") -> Optional[dict]:
+    path = f"{storage.APP_NAME}/imports/{owner_id}/{import_id}/{new_id()}.{ext}"
+    try:
+        result = await asyncio.to_thread(storage.put_object, path, data, content_type)
+    except Exception as exc:
+        logger.error(f"import image storage failed: {exc}")
+        return None
+    await db.files.insert_one({
+        "id": new_id(), "storage_path": result["path"], "original_filename": filename,
+        "content_type": content_type, "size": result.get("size", len(data)), "owner_id": owner_id,
+        "import_id": import_id, "item_id": item_id, "is_deleted": False, "created_at": now_iso(),
+    })
+    return {"path": result["path"], "url": _public_file_url(result["path"])}
+
+
+async def _download_item_images(product: dict, session: dict, item_id: str) -> dict:
+    """Download every supplier image into our storage so the merchant can pick which ones to keep."""
+    sources = {}
+    for kind, urls in (("product", [product.get("image")] + list(product.get("gallery") or [])),
+                       ("description", product.get("description_images") or []),
+                       ("variant", [v.get("image") for v in product.get("variants") or []])):
+        for url in urls:
+            if url and url not in sources:
+                sources[url] = kind
+    semaphore = asyncio.Semaphore(6)
+
+    async def fetch(url):
+        async with semaphore:
+            downloaded = await asyncio.to_thread(download_image, url)
+            if not downloaded:
+                return url, None
+            data, content_type, ext = downloaded
+            return url, await _store_import_image(data, content_type, ext, session["owner_id"], session["id"], item_id, url[-120:])
+
+    stored = dict(await asyncio.gather(*(fetch(url) for url in sources)))
+    candidates, mapping = [], {}
+    for url, kind in sources.items():
+        info = stored.get(url)
+        local = info["url"] if info else url
+        mapping[url] = local
+        if kind != "variant" or not any(c["url"] == local for c in candidates):
+            candidates.append({"id": new_id(), "url": local, "path": info["path"] if info else None,
+                               "kind": kind, "stored": bool(info)})
+    product = dict(product)
+    product["image"] = mapping.get(product.get("image"), "")
+    product["gallery"] = [mapping[u] for u in product.get("gallery") or []]
+    product["description_images"] = [mapping[u] for u in product.get("description_images") or []]
+    product["variants"] = [{**v, "image": mapping.get(v.get("image"), "")} for v in product.get("variants") or []]
+    product["candidates"] = candidates
+    return product
+
+
+def _image_ref_ok(value: str, allowed_local: set) -> bool:
+    if _file_path_from_url(value):
+        return value in allowed_local
+    return _is_https_image_url(value)
+
+
 def _is_https_image_url(value: str) -> bool:
     if not isinstance(value, str) or not value or len(value) > 2048:
         return False
@@ -2048,6 +2185,30 @@ def _is_https_image_url(value: str) -> bool:
         return parsed.scheme.lower() == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
     except ValueError:
         return False
+
+
+def _clean_import_variants(variants) -> list:
+    """Keep only merchant-editable variant fields; supplier prices stay informational."""
+    result = []
+    for v in (variants or [])[:50]:
+        if not isinstance(v, dict) or not str(v.get("label") or "").strip():
+            continue
+        row = {"label": str(v["label"]).strip()[:100], "image": str(v.get("image") or ""),
+               "sku": str(v.get("sku") or "")[:100],
+               "type": str(v.get("type") or "").strip()[:100], "description": str(v.get("description") or "").strip()[:1000],
+               "source_currency": str(v.get("source_currency") or "")[:8]}
+        try:
+            source_price = float(v["source_price"]) if v.get("source_price") is not None else None
+            row["source_price"] = source_price if source_price is not None and math.isfinite(source_price) and source_price > 0 else None
+            for key in ("price_simple", "price_partner", "price_pro", "price_enterprise", "stock"):
+                number = float(v.get(key) or 0)
+                if not math.isfinite(number) or number < 0:
+                    raise ValueError
+                row[key] = int(number) if key == "stock" else number
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Stock et prix des variantes doivent être positifs.")
+        result.append(row)
+    return result
 
 
 async def _save_supplier_import_batch(session: dict, urls: list, remaining_urls: list, next_url: Optional[str]):
@@ -2073,14 +2234,21 @@ async def _save_supplier_import_batch(session: dict, urls: list, remaining_urls:
         if error:
             errors.append({"url": url, "message": error[:300]})
             continue
+        item_id = new_id()
+        product = await _download_item_images(product, session, item_id)
         item = {
-            "id": new_id(),
+            "id": item_id,
             "import_id": session["id"],
             "shop_id": session["shop_id"],
             "owner_id": session["owner_id"],
             "position": position + index,
             "source_url": url,
             **product,
+            "description_images": product.get("description_images") or [],
+            "variants": [
+                {**v, "price_simple": 0, "price_partner": 0, "price_pro": 0, "price_enterprise": 0, "stock": 0}
+                for v in product.get("variants") or []
+            ],
             "category": "",
             "subcategory": "",
             "stock": 0,
@@ -2265,9 +2433,17 @@ async def update_supplier_import_item(import_id: str, item_id: str, req: Supplie
         if len(update["gallery"] or []) > 20:
             raise HTTPException(status_code=400, detail="Maximum 20 images par produit.")
         images.extend(update["gallery"] or [])
+    if "description_images" in update:
+        if len(update["description_images"] or []) > 40:
+            raise HTTPException(status_code=400, detail="Maximum 40 images de description par produit.")
+        images.extend(update["description_images"] or [])
+    if "variants" in update:
+        update["variants"] = _clean_import_variants(update["variants"])
+        images.extend(v["image"] for v in update["variants"])
+    allowed_local = {c["url"] for c in item.get("candidates") or []}
     for image in images:
-        if image and not _is_https_image_url(image):
-            raise HTTPException(status_code=400, detail="Chaque image doit utiliser une adresse HTTPS valide.")
+        if image and not _image_ref_ok(image, allowed_local):
+            raise HTTPException(status_code=400, detail="Chaque image doit provenir de l'import ou utiliser une adresse HTTPS valide.")
     for key in ("stock", "price_simple", "price_partner", "price_pro", "price_enterprise", "shipping_fee"):
         if key in update:
             if update[key] is None or not math.isfinite(float(update[key])) or float(update[key]) < 0:
@@ -2291,14 +2467,13 @@ async def publish_supplier_import_item(import_id: str, item_id: str, user: dict 
     prices = [float(item.get(key) or 0) for key in ("price_simple", "price_partner", "price_pro", "price_enterprise")]
     if not item.get("name", "").strip() or any(not math.isfinite(price) or price <= 0 for price in prices):
         raise HTTPException(status_code=400, detail="Complétez le nom et les quatre prix de vente avant de publier.")
-    if int(item.get("stock") or 0) <= 0:
+    if not item.get("variants") and int(item.get("stock") or 0) <= 0:
         raise HTTPException(status_code=400, detail="Indiquez un stock supérieur à zéro avant de publier.")
     if not math.isfinite(float(item.get("shipping_fee") or 0)) or float(item.get("shipping_fee") or 0) < 0:
         raise HTTPException(status_code=400, detail="Les frais de transport doivent être positifs ou égaux à zéro.")
-    if item.get("image") and not _is_https_image_url(item["image"]):
-        raise HTTPException(status_code=400, detail="L’image principale doit être une adresse HTTPS valide.")
-    if any(not _is_https_image_url(image) for image in item.get("gallery") or []):
-        raise HTTPException(status_code=400, detail="Toutes les images doivent utiliser une adresse HTTPS valide.")
+    allowed_local = {c["url"] for c in item.get("candidates") or []}
+    if any(not _image_ref_ok(image, allowed_local) for image in _product_image_urls(item)):
+        raise HTTPException(status_code=400, detail="Toutes les images doivent provenir de l'import ou utiliser une adresse HTTPS valide.")
     await categories.check_pair(item.get("category") or "", item.get("subcategory") or "")
     settings = await get_settings()
     quota = shop.get("product_quota") or settings.get("default_product_quota", 0) or 0
@@ -2308,9 +2483,17 @@ async def publish_supplier_import_item(import_id: str, item_id: str, user: dict 
     storage_quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
     if storage_quota_mb > 0:
         used = await _shop_storage_bytes(shop["id"])
-        if used + _product_img_bytes(item.get("image", ""), item.get("gallery", [])) > storage_quota_mb * 1024 * 1024:
+        if used + _product_img_bytes(item.get("image", ""), item.get("gallery", []), item.get("description_images", [])) > storage_quota_mb * 1024 * 1024:
             raise HTTPException(status_code=403, detail=f"Quota de stockage atteint ({storage_quota_mb} Mo).")
 
+    variants = _normalize_variants([
+        {**v, "price_simple": v.get("price_simple") or prices[0], "price_partner": v.get("price_partner") or prices[1],
+         "price_pro": v.get("price_pro") or prices[2], "price_enterprise": v.get("price_enterprise") or prices[3]}
+        for v in item.get("variants") or []
+    ])
+    product_stock = sum(v["stock"] for v in variants) if variants else int(item["stock"])
+    if product_stock <= 0:
+        raise HTTPException(status_code=400, detail="Indiquez un stock supérieur à zéro avant de publier.")
     product_id = item.get("product_id") or new_id()
     claim = await db.supplier_import_items.find_one_and_update(
         {"id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING"},
@@ -2324,16 +2507,17 @@ async def publish_supplier_import_item(import_id: str, item_id: str, user: dict 
             "currency": shop["currency"], "currency_symbol": shop.get("currency_symbol", ""),
             "name": item["name"].strip(), "short_description": item.get("short_description", ""),
             "description": item.get("description", ""), "image": item.get("image", ""),
-            "gallery": item.get("gallery") or [], "category": item.get("category") or "",
+            "gallery": item.get("gallery") or [], "description_images": item.get("description_images") or [],
+            "category": item.get("category") or "",
             "subcategory": item.get("subcategory") or "", "genre": "", "usage": "",
             "attributes": {"brand": item.get("brand", "")},
             "weight": 0, "dimensions": "", "sku": item.get("sku") or gen_sku(),
-            "stock": int(item["stock"]), "alert_threshold": 5,
+            "stock": int(product_stock), "alert_threshold": 5,
             "price_simple": prices[0], "price_partner": prices[1], "price_pro": prices[2],
             "price_enterprise": prices[3], "shipping_fee": float(item.get("shipping_fee") or 0),
-            "promo": {}, "variants": [], "status": "ACTIVE", "moderation_status": "PENDING",
+            "promo": {}, "variants": variants, "status": "ACTIVE", "moderation_status": "PENDING",
             "moderation_reason": "", "views": 0, "sold": 0, "flagged": False,
-            "initial_stock": int(item["stock"]), "created_at": now_iso(), "is_demo": False,
+            "initial_stock": int(product_stock), "created_at": now_iso(), "is_demo": False,
         }
         if not await db.products.find_one({"id": product_id}):
             await db.products.insert_one(product)
@@ -2355,6 +2539,9 @@ async def publish_supplier_import_item(import_id: str, item_id: str, user: dict 
             {"$set": {"status": "PENDING", "updated_at": now_iso()}},
         )
         raise
+    kept = {_file_path_from_url(url) for url in _product_image_urls(item)}
+    await _purge_files([c.get("path") for c in item.get("candidates") or [] if c.get("path") not in kept], user["id"])
+    await db.supplier_import_items.update_one({"id": item_id}, {"$set": {"candidates": []}})
     await audit_log(user, "IMPORT_SUPPLIER_PRODUCT", "product", product["id"], None, item["source_url"])
     await _notify_moderators("PRODUCT_MODERATION", "Produit importé à valider",
                              f"Le produit « {product['name']} » importé par {shop['name']} attend une validation.", "/admin/products")
@@ -2364,13 +2551,56 @@ async def publish_supplier_import_item(import_id: str, item_id: str, user: dict 
 @api.post("/products/supplier-imports/{import_id}/items/{item_id}/dismiss")
 async def dismiss_supplier_import_item(import_id: str, item_id: str, user: dict = Depends(require_roles("MERCHANT"))):
     session, _ = await _owned_supplier_import(import_id, user)
-    result = await db.supplier_import_items.update_one(
+    item = await db.supplier_import_items.find_one_and_update(
         {"id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING"},
-        {"$set": {"status": "DISMISSED", "updated_at": now_iso()}},
+        {"$set": {"status": "DISMISSED", "candidates": [], "image": "", "gallery": [], "description_images": [],
+                  "updated_at": now_iso()}},
     )
-    if not result.modified_count:
+    if not item:
         raise HTTPException(status_code=404, detail="Produit à ignorer introuvable.")
+    await _purge_files([c.get("path") for c in item.get("candidates") or []], user["id"])
     return {"message": "Produit ignoré"}
+
+
+@api.post("/products/supplier-imports/{import_id}/items/{item_id}/images")
+async def add_supplier_import_item_images(import_id: str, item_id: str, kind: str = Query("product"),
+                                          files: List[UploadFile] = File(...),
+                                          user: dict = Depends(require_roles("MERCHANT"))):
+    """Let the merchant add pictures from their computer to an imported product draft."""
+    session, _ = await _owned_supplier_import(import_id, user)
+    item = await db.supplier_import_items.find_one({
+        "id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING",
+    })
+    if not item:
+        raise HTTPException(status_code=404, detail="Produit à valider introuvable.")
+    if kind not in ("product", "description"):
+        raise HTTPException(status_code=400, detail="Type d'image invalide.")
+    field = "description_images" if kind == "description" else "gallery"
+    limit = 40 if kind == "description" else 20
+    if len(item.get(field) or []) + len(files) > limit or len(files) > 20:
+        raise HTTPException(status_code=400, detail=f"Maximum {limit} images pour cette section.")
+    added = []
+    for upload in files:
+        data = await upload.read()
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(status_code=413, detail="Image trop lourde (max 6 Mo)")
+        sniffed = _sniff_image(data)
+        if not sniffed:
+            raise HTTPException(status_code=400, detail="Format non supporté (JPEG, PNG, WEBP, GIF)")
+        info = await _store_import_image(data, sniffed[0], sniffed[1], user["id"], session["id"], item_id, upload.filename or "")
+        if not info:
+            raise HTTPException(status_code=502, detail="Échec de l'upload de l'image")
+        added.append({"id": new_id(), "url": info["url"], "path": info["path"], "kind": kind, "stored": True})
+    update = {"$push": {"candidates": {"$each": added}, field: {"$each": [c["url"] for c in added]}},
+              "$set": {"updated_at": now_iso()}}
+    if kind == "product" and not item.get("image"):
+        update["$push"][field] = {"$each": [c["url"] for c in added][1:]}
+        update["$set"]["image"] = added[0]["url"] if added else ""
+    await db.supplier_import_items.update_one({"id": item_id}, update)
+    refreshed = await db.supplier_import_items.find_one({"id": item_id})
+    result = serialize(refreshed)
+    result.pop("owner_id", None)
+    return {"item": result}
 
 
 # ---------------- Checkout / Orders ----------------
@@ -3921,7 +4151,12 @@ async def report_product(product_id: str, req: ProductReportReq, user: dict = De
 async def admin_products(status: Optional[str] = None, flagged: Optional[bool] = None,
                          user: dict = Depends(require_module("products"))):
     query = {"status": {"$ne": "DELETED"}}
-    if status:
+    if status == "PENDING":
+        query["$or"] = [
+            {"moderation_status": "PENDING"},
+            {"pending_update": {"$exists": True}},
+        ]
+    elif status:
         query["moderation_status"] = status
     if flagged is not None:
         query["flagged"] = flagged
@@ -3929,9 +4164,22 @@ async def admin_products(status: Optional[str] = None, flagged: Optional[bool] =
     out = []
     for p in products:
         item = serialize(p)
+        item["has_pending_update"] = bool(p.get("pending_update"))
         item["report_count"] = await db.product_reports.count_documents({"product_id": p["id"], "status": "OPEN"})
         out.append(item)
     return {"products": out}
+
+
+@api.get("/admin/products/{product_id}/preview")
+async def admin_product_preview(product_id: str, user: dict = Depends(require_module("products"))):
+    product = await db.products.find_one({"id": product_id, "status": {"$ne": "DELETED"}})
+    if not product:
+        raise HTTPException(status_code=404, detail="Article introuvable")
+    candidate = _pending_product_view(product)
+    result = _public_product(candidate, "SIMPLE")
+    result["preview"] = True
+    result["has_pending_update"] = bool(product.get("pending_update"))
+    return {"product": result}
 
 
 @api.put("/admin/products/{product_id}/moderate")
@@ -3943,6 +4191,32 @@ async def moderate_product(product_id: str, req: ProductModerateReq, request: Re
     decision = req.decision.upper()
     if decision not in ("APPROVE", "REJECT"):
         raise HTTPException(status_code=400, detail="Décision invalide")
+    if product.get("pending_update"):
+        if decision == "APPROVE":
+            update = dict(product["pending_update"])
+            update["daily_offer.status"] = "EXPIRED"
+            update["moderation_reason"] = ""
+            await db.products.update_one({"id": product_id}, {
+                "$set": update,
+                "$unset": {"pending_update": "", "pending_update_at": "", "pending_update_reason": ""},
+            })
+            outcome = "validée"
+            notification_type = "merchant_product_approved"
+        else:
+            await db.products.update_one({"id": product_id}, {
+                "$set": {"pending_update_reason": req.reason or "", "updated_at": now_iso()},
+                "$unset": {"pending_update": "", "pending_update_at": ""},
+            })
+            outcome = "refusée"
+            notification_type = "merchant_product_rejected"
+        shop = await db.shops.find_one({"id": product["shop_id"]})
+        if shop:
+            await send_message(shop["owner_id"], notification_type, {
+                "product": product.get("name", ""), "reason": req.reason or "—",
+            }, "/merchant/products", "PRODUCT_MODERATION")
+        await audit_log(user, f"MODERATE_PRODUCT_UPDATE_{decision}", "product", product_id,
+                        "PENDING_UPDATE", decision, _client_ip(request))
+        return {"message": f"Modification du produit {outcome}"}
     new_status = "APPROVED" if decision == "APPROVE" else "REJECTED"
     await db.products.update_one({"id": product_id}, {"$set": {
         "moderation_status": new_status, "moderation_reason": req.reason or ""}})

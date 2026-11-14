@@ -23,7 +23,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Home, Package, ShoppingCart, Users, Lightbulb, Boxes, BarChart3, Gift, Tag, Settings,
   Plus, Pencil, Trash2, Minus, TrendingUp, AlertTriangle, CheckCircle2, Clock, Phone, Mail, IdCard, Store, FileText,
-  Upload, X, Image as ImageIcon, Layers, UploadCloud, UserCog, Link2,
+  Check, Upload, X, Image as ImageIcon, Layers, UploadCloud, UserCog, Link2,
 } from "lucide-react";
 import { CategoryPicker } from "@/components/CategoryPicker";
 
@@ -365,12 +365,12 @@ export function MerchantOverview() {
 /* ---------------- Products ---------------- */
 const emptyProduct = {
   name: "", short_description: "", description: "", image: "https://images.unsplash.com/photo-1560343090-f0409e92791a?q=80&w=600",
-  gallery: [], category: "", subcategory: "", stock: 0, alert_threshold: 5, price_simple: 0, price_partner: 0, price_pro: 0, price_enterprise: 0,
+  gallery: [], description_images: [], category: "", subcategory: "", stock: 0, alert_threshold: 5, price_simple: 0, price_partner: 0, price_pro: 0, price_enterprise: 0,
   shipping_fee: 0, weight: 0, dimensions: "", sku: "", variants: [],
   promo: { enabled: false, promo_price: 0, promo_qty: 0, promo_sold: 0 },
 };
 
-function ImageUploader({ value, gallery, onImage, onGallery }) {
+function ImageUploader({ value, gallery, onImage, onGallery, descImages, onDescImages }) {
   const [busy, setBusy] = useState(false);
   const doUpload = async (files, isGallery) => {
     if (!files || !files.length) return;
@@ -378,7 +378,8 @@ function ImageUploader({ value, gallery, onImage, onGallery }) {
     try {
       const urls = [];
       for (const f of files) urls.push(await uploadImage(f));
-      if (isGallery) onGallery([...(gallery || []), ...urls]);
+      if (isGallery === "desc") onDescImages([...(descImages || []), ...urls]);
+      else if (isGallery) onGallery([...(gallery || []), ...urls]);
       else onImage(urls[0]);
       toast.success("Image(s) téléversée(s)");
     } catch (e) { toast.error(apiErr(e)); }
@@ -419,12 +420,32 @@ function ImageUploader({ value, gallery, onImage, onGallery }) {
           </label>
         </div>
       </div>
+      {onDescImages && (
+        <div>
+          <Label>Images de description ({(descImages || []).length})</Label>
+          <div className="mt-1 flex flex-wrap gap-2">
+            {(descImages || []).map((g, idx) => (
+              <div key={idx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-border group" data-testid={`desc-image-${idx}`}>
+                <img src={g} alt="" className="w-full h-full object-cover" />
+                <button type="button" onClick={() => onDescImages(descImages.filter((_, i) => i !== idx))}
+                  className="absolute top-0.5 right-0.5 bg-black/60 rounded-full p-0.5 text-white opacity-0 group-hover:opacity-100 transition-opacity">
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+            <label className="w-16 h-16 rounded-lg border-2 border-dashed border-border grid place-items-center cursor-pointer hover:border-primary transition-colors" data-testid="upload-desc-image">
+              <Plus className="w-5 h-5 text-muted-foreground" />
+              <input type="file" accept="image/*" multiple className="hidden" disabled={busy} onChange={(e) => doUpload(Array.from(e.target.files), "desc")} />
+            </label>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function VariantsEditor({ variants, onChange, currency }) {
-  const add = () => onChange([...(variants || []), { id: `new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, label: "", sku: "", stock: 0, price_simple: 0, price_partner: 0, price_pro: 0, price_enterprise: 0 }]);
+function VariantsEditor({ variants, onChange, currency, imageOptions }) {
+  const add = () => onChange([...(variants || []), { id: `new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, label: "", type: "", description: "", sku: "", stock: 0, price_simple: 0, price_partner: 0, price_pro: 0, price_enterprise: 0 }]);
   const upd = (idx, k, v) => onChange(variants.map((vr, i) => (i === idx ? { ...vr, [k]: v } : vr)));
   const del = (idx) => onChange(variants.filter((_, i) => i !== idx));
   return (
@@ -441,10 +462,22 @@ function VariantsEditor({ variants, onChange, currency }) {
           {variants.map((vr, idx) => (
             <div key={vr.id || idx} className="border border-border rounded-lg p-2 bg-background" data-testid={`variant-row-${idx}`}>
               <div className="flex items-center gap-2 mb-2">
+                {vr.image && <img src={vr.image} alt="" className="w-8 h-8 rounded object-cover shrink-0" />}
                 <Input value={vr.label} onChange={(e) => upd(idx, "label", e.target.value)} placeholder="Ex: Rouge / M" className="h-8" data-testid={`variant-label-${idx}`} />
                 <Input type="number" value={vr.stock} onChange={(e) => upd(idx, "stock", Number(e.target.value))} placeholder="Stock" className="h-8 w-24" data-testid={`variant-stock-${idx}`} />
                 <Button type="button" size="icon" variant="ghost" className="h-8 w-8 text-destructive shrink-0" onClick={() => del(idx)} data-testid={`variant-del-${idx}`}><Trash2 className="w-4 h-4" /></Button>
               </div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <Input value={vr.type || ""} onChange={(e) => upd(idx, "type", e.target.value)} placeholder="Type (ex: Couleur, Taille)" className="h-8" data-testid={`variant-type-${idx}`} />
+                {imageOptions && imageOptions.length > 0 && (
+                  <select value={vr.image || ""} onChange={(e) => upd(idx, "image", e.target.value)} className="h-8 rounded-md border border-input bg-background px-2 text-xs" aria-label="Image de la variante">
+                    <option value="">Image de la variante…</option>
+                    {imageOptions.map((url, n) => <option key={url} value={url}>Image {n + 1}</option>)}
+                  </select>
+                )}
+              </div>
+              <Textarea value={vr.description || ""} onChange={(e) => upd(idx, "description", e.target.value)} placeholder="Description propre à cette variante" className="mb-2 min-h-[48px]" data-testid={`variant-desc-${idx}`} />
+              {vr.source_price != null && <div className="text-[11px] text-muted-foreground mb-1">Prix fournisseur (visible par vous seul) : {vr.source_price} {vr.source_currency}</div>}
               <div className="grid grid-cols-4 gap-2">
                 <Input type="number" value={vr.price_simple} onChange={(e) => upd(idx, "price_simple", Number(e.target.value))} placeholder="PCS" className="h-8" data-testid={`variant-pcs-${idx}`} />
                 <Input type="number" value={vr.price_partner} onChange={(e) => upd(idx, "price_partner", Number(e.target.value))} placeholder="PP" className="h-8" data-testid={`variant-pp-${idx}`} />
@@ -468,7 +501,7 @@ function ProductForm({ initial, onSaved, shop }) {
     const payload = { ...f, stock: Number(f.stock), alert_threshold: Number(f.alert_threshold),
       price_simple: Number(f.price_simple), price_partner: Number(f.price_partner), price_pro: Number(f.price_pro),
       price_enterprise: Number(f.price_enterprise), shipping_fee: Number(f.shipping_fee), weight: Number(f.weight),
-      gallery: f.gallery || [], variants: (f.variants || []).map((v) => ({ ...v, id: v.id && v.id.startsWith("new-") ? undefined : v.id })),
+      gallery: f.gallery || [], description_images: f.description_images || [], variants: (f.variants || []).map((v) => ({ ...v, id: v.id && v.id.startsWith("new-") ? undefined : v.id })),
       promo: { ...f.promo, promo_price: Number(f.promo.promo_price || 0), promo_qty: Number(f.promo.promo_qty || 0), promo_sold: Number(f.promo.promo_sold || 0) } };
     try {
       if (initial?.id) await api.put(`/products/${initial.id}`, payload);
@@ -479,7 +512,7 @@ function ProductForm({ initial, onSaved, shop }) {
   return (
     <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
       <div><Label>Nom</Label><Input value={f.name} onChange={(e) => upd("name", e.target.value)} className="mt-1" data-testid="prod-name" /></div>
-      <ImageUploader value={f.image} gallery={f.gallery} onImage={(v) => upd("image", v)} onGallery={(v) => upd("gallery", v)} />
+      <ImageUploader value={f.image} gallery={f.gallery} onImage={(v) => upd("image", v)} onGallery={(v) => upd("gallery", v)} descImages={f.description_images} onDescImages={(v) => upd("description_images", v)} />
       <div><Label>Description courte</Label><Input value={f.short_description} onChange={(e) => upd("short_description", e.target.value)} className="mt-1" /></div>
       <div><Label>Description complète</Label><Textarea value={f.description} onChange={(e) => upd("description", e.target.value)} className="mt-1" /></div>
       <div className="grid grid-cols-2 gap-3">
@@ -517,10 +550,46 @@ function ProductForm({ initial, onSaved, shop }) {
   );
 }
 
+function ImagePicker({ title, candidates, isSelected, mainUrl, onToggle, onMain, onFiles, busy, testId }) {
+  const selected = candidates.filter((c) => isSelected(c.url)).length;
+  return (
+    <div data-testid={testId}>
+      <div className="flex items-center justify-between mb-1">
+        <Label>{title} — {selected}/{candidates.length} sélectionnée(s)</Label>
+        <label className="inline-flex items-center gap-1 text-xs border border-border rounded-full px-3 py-1 cursor-pointer hover:bg-accent">
+          <Upload className="w-3.5 h-3.5" /> {busy ? "Envoi..." : "Ajouter depuis l’ordinateur"}
+          <input type="file" accept="image/*" multiple className="hidden" disabled={busy} onChange={(e) => { onFiles(Array.from(e.target.files)); e.target.value = ""; }} />
+        </label>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {candidates.map((c) => {
+          const on = isSelected(c.url);
+          return (
+            <div key={c.id} className={`relative w-20 h-20 rounded-lg overflow-hidden border-2 ${on ? "border-primary" : "border-border opacity-50"}`}>
+              <button type="button" className="w-full h-full" onClick={() => onToggle(c.url)} aria-pressed={on} aria-label="Sélectionner l’image">
+                <img src={c.url} alt="" loading="lazy" className="w-full h-full object-cover" />
+              </button>
+              {on && <span className="absolute top-0.5 left-0.5 bg-primary text-primary-foreground rounded-full p-0.5"><Check className="w-3 h-3" /></span>}
+              {on && onMain && (
+                <button type="button" onClick={() => onMain(c.url)} className={`absolute bottom-0 inset-x-0 text-[10px] py-0.5 ${mainUrl === c.url ? "bg-primary text-primary-foreground" : "bg-black/60 text-white"}`}>
+                  {mainUrl === c.url ? "Principale" : "Définir principale"}
+                </button>
+              )}
+            </div>
+          );
+        })}
+        {candidates.length === 0 && <span className="text-xs text-muted-foreground">Aucune image récupérée — ajoutez-en depuis votre ordinateur.</span>}
+      </div>
+    </div>
+  );
+}
+
 function SupplierImportDraft({ item, importId, shop, onChanged }) {
   const [form, setForm] = useState({
     ...item,
     gallery: item.gallery || [],
+    description_images: item.description_images || [],
+    variants: item.variants || [],
     stock: item.stock || 0,
     price_simple: item.price_simple || 0,
     price_partner: item.price_partner || 0,
@@ -529,13 +598,17 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
     shipping_fee: item.shipping_fee || 0,
   });
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const upd = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   const save = async () => {
     setBusy(true);
     try {
+      const { candidates, ...rest } = form;
       const payload = {
-        ...form,
+        ...rest,
         gallery: form.gallery || [],
+        description_images: form.description_images || [],
+        variants: (form.variants || []).map((v) => ({ ...v, stock: Number(v.stock) || 0 })),
         stock: Number(form.stock),
         price_simple: Number(form.price_simple),
         price_partner: Number(form.price_partner),
@@ -544,7 +617,7 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
         shipping_fee: Number(form.shipping_fee),
       };
       const { data } = await api.put(`/products/supplier-imports/${importId}/items/${item.id}`, payload);
-      setForm(data.item);
+      setForm((cur) => ({ ...data.item, candidates: data.item.candidates || cur.candidates }));
       toast.success("Brouillon enregistré");
       onChanged();
       return true;
@@ -570,6 +643,35 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
     } catch (e) { toast.error(apiErr(e)); }
     finally { setBusy(false); }
   };
+  const pool = (kind) => (form.candidates || []).filter((c) => c.kind === kind);
+  const toggleProduct = (url) => setForm((cur) => {
+    const gallery = cur.gallery || [];
+    if (url === cur.image) return { ...cur, image: gallery[0] || "", gallery: gallery.slice(1) };
+    if (gallery.includes(url)) return { ...cur, gallery: gallery.filter((u) => u !== url) };
+    return cur.image ? { ...cur, gallery: [...gallery, url] } : { ...cur, image: url };
+  });
+  const setMain = (url) => setForm((cur) => {
+    const rest = [cur.image, ...(cur.gallery || [])].filter((u) => u && u !== url);
+    return { ...cur, image: url, gallery: rest };
+  });
+  const toggleDescription = (url) => setForm((cur) => {
+    const list = cur.description_images || [];
+    return { ...cur, description_images: list.includes(url) ? list.filter((u) => u !== url) : [...list, url] };
+  });
+  const addFiles = async (files, kind) => {
+    if (!files.length) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      files.forEach((file) => fd.append("files", file));
+      const { data } = await api.post(`/products/supplier-imports/${importId}/items/${item.id}/images?kind=${kind}`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setForm((cur) => ({ ...cur, candidates: data.item.candidates, image: cur.image || data.item.image,
+        gallery: [...(cur.gallery || []), ...(data.item.gallery || []).filter((u) => !(cur.gallery || []).includes(u) && u !== (cur.image || data.item.image))],
+        description_images: [...(cur.description_images || []), ...(data.item.description_images || []).filter((u) => !(cur.description_images || []).includes(u))] }));
+      toast.success("Image(s) ajoutée(s)");
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setUploading(false); }
+  };
   if (item.status !== "PENDING") return null;
   return (
     <div className="border border-border rounded-xl p-4 space-y-3">
@@ -581,11 +683,16 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
           <Input className="mt-2" value={form.name} onChange={(e) => upd("name", e.target.value)} placeholder="Nom du produit" aria-label="Nom du produit" />
         </div>
       </div>
-      <Input value={form.image} onChange={(e) => upd("image", e.target.value)} placeholder="URL HTTPS de l’image principale" aria-label="Image principale" />
-      <Textarea value={(form.gallery || []).join("\n")} onChange={(e) => upd("gallery", e.target.value.split("\n").map((url) => url.trim()).filter(Boolean))} placeholder="Images supplémentaires — une URL HTTPS par ligne" aria-label="Galerie d’images" />
+      <ImagePicker title="Images du produit" candidates={pool("product")} isSelected={(url) => url === form.image || (form.gallery || []).includes(url)}
+        mainUrl={form.image} onToggle={toggleProduct} onMain={setMain} onFiles={(files) => addFiles(files, "product")} busy={uploading} testId="import-product-images" />
+      <ImagePicker title="Images de description" candidates={pool("description")} isSelected={(url) => (form.description_images || []).includes(url)}
+        onToggle={toggleDescription} onFiles={(files) => addFiles(files, "description")} busy={uploading} testId="import-description-images" />
+      <p className="text-[11px] text-muted-foreground">Les images non sélectionnées seront supprimées définitivement à la validation.</p>
       <Input value={form.short_description || ""} onChange={(e) => upd("short_description", e.target.value)} placeholder="Description courte" aria-label="Description courte" />
       <Textarea value={form.description || ""} onChange={(e) => upd("description", e.target.value)} placeholder="Description détaillée" aria-label="Description détaillée" />
       <CategoryPicker category={form.category || ""} subcategory={form.subcategory || ""} onChange={(category, subcategory) => setForm((current) => ({ ...current, category, subcategory }))} />
+      <VariantsEditor variants={form.variants || []} onChange={(v) => upd("variants", v)} currency={shop?.currency}
+        imageOptions={[...new Set([form.image, ...(form.gallery || []), ...(form.variants || []).map((v) => v.image)].filter(Boolean))]} />
       <div className="grid grid-cols-2 gap-3">
         <div><Label>Stock</Label><Input type="number" min="1" value={form.stock} onChange={(e) => upd("stock", e.target.value)} /></div>
         <div><Label>Transport ({shop?.currency})</Label><Input type="number" min="0" value={form.shipping_fee} onChange={(e) => upd("shipping_fee", e.target.value)} /></div>
@@ -783,17 +890,21 @@ export function MerchantProducts() {
       {products.length === 0 ? <EmptyState title="Aucun article" description="Créez votre premier article." action={<Button className="rounded-full" onClick={openNew}>Créer</Button>} /> : (
         <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
           <Table>
-            <TableHeader><TableRow><TableHead>Article</TableHead><TableHead>Cat.</TableHead><TableHead className="text-right">PCS</TableHead><TableHead className="text-right">Stock</TableHead><TableHead>Dispo</TableHead><TableHead>Modération</TableHead><TableHead></TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>Article</TableHead><TableHead>Types</TableHead><TableHead>Cat.</TableHead><TableHead className="text-right">PCS</TableHead><TableHead className="text-right">Stock</TableHead><TableHead>Dispo</TableHead><TableHead>Modération</TableHead><TableHead></TableHead></TableRow></TableHeader>
             <TableBody>
               {products.map((p) => (
                 <TableRow key={p.id} data-testid={`prod-row-${p.id}`}>
                   <TableCell><div className="flex items-center gap-2"><img src={p.image} alt="" className="w-9 h-9 rounded object-cover" /><span className="font-medium text-sm">{p.name}</span>{p.promo?.enabled && <span className="text-[10px] bg-primary text-white px-1.5 rounded">PROMO</span>}</div></TableCell>
+                  <TableCell className="max-w-[180px]">
+                    {(p.variants || []).length ? <div className="flex flex-wrap gap-1">{p.variants.slice(0, 3).map((v) => <span key={v.id} className="text-[10px] rounded-full bg-muted px-1.5 py-0.5">{v.label || v.type || "Type"}</span>)}{p.variants.length > 3 && <span className="text-[10px] text-muted-foreground">+{p.variants.length - 3}</span>}</div> : <span className="text-xs text-muted-foreground">—</span>}
+                  </TableCell>
                   <TableCell className="text-xs">{p.category ? `${p.category}${p.subcategory ? ` › ${p.subcategory}` : ""}` : <span className="text-amber-700 font-medium" data-testid={`uncategorized-${p.id}`}>Sans catégorie — à réattribuer</span>}</TableCell>
                   <TableCell className="text-right font-mono">{money(p.price_simple, p.currency)}</TableCell>
                   <TableCell className={`text-right font-mono ${p.stock === 0 ? "text-red-600" : p.stock <= p.alert_threshold ? "text-amber-600" : ""}`}>{p.stock}</TableCell>
                   <TableCell><StatusBadge status={p.stock === 0 ? "REJETEE" : "APPROVED"} /></TableCell>
                   <TableCell data-testid={`mod-status-${p.id}`}>
                     <StatusBadge status={p.moderation_status || "APPROVED"} />
+                    {p.approved_version_online && <div className="text-[10px] text-muted-foreground mt-0.5">Version approuvée en ligne</div>}
                     {p.moderation_status === "REJECTED" && p.moderation_reason ? <div className="text-[10px] text-destructive mt-0.5 max-w-[140px]">{p.moderation_reason}</div> : null}
                   </TableCell>
                   <TableCell><div className="flex gap-1">
