@@ -167,6 +167,19 @@ export function ProductDetail() {
     const params = active ? { for_client: true } : {};
     api.get(`/products/${id}`, { params }).then((r) => setData(r.data)).catch(() => setData(false));
   }, [id, active, preview]);
+  const [more, setMore] = useState(null);
+  const curCat = data && data.product ? data.product.category : null;
+  useEffect(() => {
+    if (preview || !data || !data.product) return;
+    api.get("/products", { params: active ? { for_client: true } : {} })
+      .then((r) => {
+        const others = (r.data.products || []).filter((x) => x.id !== id);
+        const same = others.filter((x) => curCat && x.category === curCat);
+        const rest = others.filter((x) => !(curCat && x.category === curCat));
+        setMore({ same, rest: rest.slice(0, 24) });
+      })
+      .catch(() => setMore({ same: [], rest: [] }));
+  }, [id, active, preview, curCat, !!data]); // eslint-disable-line react-hooks/exhaustive-deps
   const submitReport = async () => {
     try {
       await api.post(`/products/${id}/report`, { reason: reportReason, comment: reportComment });
@@ -320,6 +333,27 @@ export function ProductDetail() {
           </button>
         )}
       </div>
+
+      {!preview && more && (more.same.length > 0 || more.rest.length > 0) && (
+        <div className="lg:col-span-2 mt-10" data-testid="more-products">
+          {more.same.length > 0 && (
+            <section className="mb-10">
+              <h3 className="font-display font-bold text-xl mb-4">Produits de la même catégorie</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4" data-testid="same-category-products">
+                {more.same.map((x, i) => <ProductCard key={x.id} product={x} index={i} />)}
+              </div>
+            </section>
+          )}
+          {more.rest.length > 0 && (
+            <section>
+              <h3 className="font-display font-bold text-xl mb-4">Autres catégories</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4" data-testid="other-category-products">
+                {more.rest.map((x, i) => <ProductCard key={x.id} product={x} index={i} />)}
+              </div>
+            </section>
+          )}
+        </div>
+      )}
 
       <Dialog open={reportOpen} onOpenChange={setReportOpen}>
         <DialogContent>
