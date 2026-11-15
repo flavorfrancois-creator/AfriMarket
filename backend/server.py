@@ -162,6 +162,11 @@ class ProductModerateReq(BaseModel):
     reason: Optional[str] = ""
 
 
+class ProductReviewReq(BaseModel):
+    rating: int
+    comment: Optional[str] = ""
+
+
 class ProductReportReq(BaseModel):
     reason: str
     comment: Optional[str] = ""
@@ -4145,6 +4150,90 @@ async def report_product(product_id: str, req: ProductReportReq, user: dict = De
         await _notify_moderators("PRODUCT_REPORT", "Nouveau signalement",
                                  f"Signalement sur « {product.get('name')} » : {req.reason}", "/admin/reports")
     return {"message": "Signalement enregistré. Merci."}
+
+
+async def _refresh_review_stats(product_id: str):
+    reviews = await db.product_reviews.find({"product_id": product_id}).to_list(5000)
+    count = len(reviews)
+    negative = sum(1 for r in reviews if r["rating"] <= 2)
+    avg = round(sum(r["rating"] for r in reviews) / count, 2) if count else 0
+    await db.products.update_one({"id": product_id}, {"$set": {
+        "review_count": count, "review_avg": avg, "negative_review_count": negative}})
+    return count, negative, avg
+
+
+@api.get("/products/{product_id}/reviews")
+async def list_product_reviews(product_id: str):
+    reviews = await db.product_reviews.find({"product_id": product_id}).sort("created_at", -1).to_list(200)
+    count = len(reviews)
+    avg = round(sum(r["rating"] for r in reviews) / count, 2) if count else 0
+    return {"count": count, "average": avg, "reviews": [
+        {"id": r["id"], "user_id": r["user_id"], "user_name": r.get("user_name") or "Client",
+         "rating": r["rating"], "comment": r.get("comment", ""), "created_at": r["created_at"]}
+        for r in reviews]}
+
+
+@api.post("/products/{product_id}/reviews")
+async def post_product_review(product_id: str, req: ProductReviewReq, user: dict = Depends(get_current_user)):
+    _deny_partner(user)
+    if not 1 <= req.rating <= 5:
+        raise HTTPException(status_code=400, detail="La note doit être comprise entre 1 et 5")
+    product = await db.products.find_one({"id": product_id, "status": "ACTIVE", "moderation_status": "APPROVED"})
+    if not product:
+        raise HTTPException(status_code=404, detail="Article introuvable")
+    comment = (req.comment or "").strip()[:1000]
+    now = now_iso()
+    existing = await db.product_reviews.find_one({"product_id": product_id, "user_id": user["id"]})
+    if existing:
+        await db.product_reviews.update_one({"id": existing["id"]}, {"$set": {
+            "rating": req.rating, "comment": comment, "updated_at": now}})
+    else:
+        await db.product_reviews.insert_one({
+            "id": new_id(), "product_id": product_id, "product_name": product.get("name"),
+            "shop_id": product.get("shop_id"), "user_id": user["id"],
+            "user_name": (user.get("name") or "Client").split(" ")[0],
+            "rating": req.rating, "comment": comment, "created_at": now})
+    count, negative, avg = await _refresh_review_stats(product_id)
+    if req.rating <= 2:
+        open_auto = await db.product_reports.find_one(
+            {"product_id": product_id, "reason": "AVIS_NEGATIFS", "status": "OPEN"})
+        if not open_auto:
+            await db.products.update_one({"id": product_id}, {"$set": {"flagged": True}})
+            await db.product_reports.insert_one({
+                "id": new_id(), "product_id": product_id, "product_name": product.get("name"),
+                "shop_id": product.get("shop_id"), "shop_name": product.get("shop_name"),
+                "reporter_id": None, "reporter_name": "Système", "auto": True,
+                "reason": "AVIS_NEGATIFS", "comment": f"Avis négatif ({req.rating}/5) — moyenne {avg}/5 sur {count} avis",
+                "status": "OPEN", "created_at": now})
+            await _notify_moderators("PRODUCT_REPORT", "Avis négatif sur un produit",
+                                     f"Le produit « {product.get('name')} » a reçu un avis négatif.", "/admin/reviews")
+    return {"message": "Merci pour votre avis", "count": count, "average": avg}
+
+
+@api.get("/admin/reviews")
+async def admin_reviews(product_id: Optional[str] = None, negative: Optional[bool] = None,
+                        user: dict = Depends(require_module("moderation"))):
+    query = {}
+    if product_id:
+        query["product_id"] = product_id
+    if negative:
+        query["rating"] = {"$lte": 2}
+    reviews = await db.product_reviews.find(query).sort("created_at", -1).to_list(500)
+    flagged = await db.products.find(
+        {"negative_review_count": {"$gt": 0}, "status": {"$ne": "DELETED"}},
+        {"id": 1, "name": 1, "shop_name": 1, "review_avg": 1, "review_count": 1, "negative_review_count": 1}
+    ).sort("negative_review_count", -1).to_list(200)
+    return {"reviews": [serialize(r) for r in reviews], "flagged_products": [serialize(p) for p in flagged]}
+
+
+@api.delete("/admin/reviews/{review_id}")
+async def admin_delete_review(review_id: str, user: dict = Depends(require_module("moderation"))):
+    review = await db.product_reviews.find_one({"id": review_id})
+    if not review:
+        raise HTTPException(status_code=404, detail="Avis introuvable")
+    await db.product_reviews.delete_one({"id": review_id})
+    count, negative, avg = await _refresh_review_stats(review["product_id"])
+    return {"message": "Avis supprimé", "count": count, "average": avg}
 
 
 @api.get("/admin/products")

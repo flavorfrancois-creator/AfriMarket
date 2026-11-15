@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Trash2, Store, Minus, Plus, ShoppingCart, MapPin, Flag, MessageCircle, Share2 } from "lucide-react";
+import { Star, Trash2, Store, Minus, Plus, ShoppingCart, MapPin, Flag, MessageCircle, Share2 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
 export function Products() {
@@ -143,6 +143,59 @@ export function ShopDetail() {
 }
 
 const TYPE_LABEL = { SIMPLE: "Client Simple", PARTENAIRE: "Partenaire", PROFESSIONNEL: "Professionnel", ENTREPRISE: "Entreprise" };
+
+function Stars({ value, onChange, size = "w-5 h-5" }) {
+  return (
+    <span className="inline-flex">
+      {[1, 2, 3, 4, 5].map((n) => (
+        <Star key={n} className={`${size} ${n <= Math.round(value) ? "fill-amber-400 text-amber-400" : "text-muted-foreground"} ${onChange ? "cursor-pointer" : ""}`}
+          onClick={onChange ? () => onChange(n) : undefined} data-testid={onChange ? `rate-star-${n}` : undefined} />
+      ))}
+    </span>
+  );
+}
+
+function ProductReviews({ productId, readOnly }) {
+  const { user } = useAuth();
+  const [data, setData] = useState(null);
+  const [rating, setRating] = useState(0);
+  const [comment, setComment] = useState("");
+  const load = () => api.get(`/products/${productId}/reviews`).then((r) => setData(r.data)).catch(() => setData({ count: 0, average: 0, reviews: [] }));
+  useEffect(() => { load(); }, [productId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const submit = async () => {
+    if (!rating) { toast.error("Choisissez une note"); return; }
+    try {
+      await api.post(`/products/${productId}/reviews`, { rating, comment });
+      toast.success("Merci pour votre avis"); setComment(""); setRating(0); load();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  if (!data) return null;
+  return (
+    <div className="mt-8" data-testid="product-reviews">
+      <h3 className="font-display font-bold mb-2">Avis clients</h3>
+      <div className="flex items-center gap-2 mb-3 text-sm">
+        <Stars value={data.average} size="w-4 h-4" />
+        <span>{data.count ? `${data.average}/5 (${data.count} avis)` : "Aucun avis pour le moment"}</span>
+      </div>
+      {!readOnly && (user ? (
+        <div className="border border-border rounded-xl p-3 mb-4 space-y-2">
+          <Stars value={rating} onChange={setRating} />
+          <Textarea value={comment} onChange={(e) => setComment(e.target.value)} maxLength={1000} placeholder="Votre avis (optionnel)" data-testid="review-comment" />
+          <Button size="sm" className="rounded-full" onClick={submit} data-testid="submit-review">Publier mon avis</Button>
+        </div>
+      ) : <p className="text-xs text-muted-foreground mb-4">Connectez-vous pour laisser un avis.</p>)}
+      <div className="space-y-3">
+        {data.reviews.map((r) => (
+          <div key={r.id} className="text-sm border-b border-border pb-2" data-testid={`review-item-${r.id}`}>
+            <div className="flex items-center gap-2"><Stars value={r.rating} size="w-3.5 h-3.5" /><span className="font-medium">{r.user_name}</span>
+              <span className="text-xs text-muted-foreground">{(r.created_at || "").slice(0, 10)}</span></div>
+            {r.comment && <p className="text-muted-foreground mt-1 whitespace-pre-line">{r.comment}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function ProductDetail() {
   const { id } = useParams();
@@ -326,6 +379,8 @@ export function ProductDetail() {
             </div>
           </div>
         )}
+
+        {!preview && <ProductReviews productId={p.id} />}
 
         {user && !preview && (
           <button className="mt-6 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive transition-colors" onClick={() => setReportOpen(true)} data-testid="report-product-btn">

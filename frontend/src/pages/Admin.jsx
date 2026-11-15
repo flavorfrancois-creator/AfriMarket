@@ -55,6 +55,7 @@ export function AdminLayout() {
     { to: "/admin/my-shop-request", label: "Demander une boutique", icon: Store, testid: "my-shop-request", show: user?.role === "ADMIN" },
     { to: "/admin/products", label: "Modération produits", icon: Package, testid: "products", show: can("products") },
     { to: "/admin/categories", label: "Catégories", icon: FolderTree, testid: "categories", show: can("products") },
+    { to: "/admin/reviews", label: "Avis clients", icon: ShieldAlert, testid: "reviews", show: can("moderation") },
     { to: "/admin/reports", label: "Signalements", icon: ShieldAlert, testid: "reports", show: can("moderation") },
     { to: "/admin/users", label: t("users"), icon: Users, testid: "users", show: can("users") },
     { to: "/admin/account-deletions", label: "Suppressions de comptes", icon: UserX, testid: "account-deletions", show: isAdminLevel },
@@ -1707,6 +1708,56 @@ export function AdminReports() {
   );
 }
 
+
+export function AdminReviews() {
+  const [data, setData] = useState(null);
+  const [onlyNeg, setOnlyNeg] = useState(false);
+  const load = () => api.get(`/admin/reviews${onlyNeg ? "?negative=true" : ""}`).then((r) => setData(r.data)).catch(() => setData({ reviews: [], flagged_products: [] }));
+  useEffect(() => { load(); }, [onlyNeg]); // eslint-disable-line react-hooks/exhaustive-deps
+  const del = async (r) => {
+    if (!window.confirm("Supprimer cet avis ?")) return;
+    try { await api.delete(`/admin/reviews/${r.id}`); toast.success("Avis supprimé"); load(); } catch (e) { toast.error(apiErr(e)); }
+  };
+  if (data === null) return <Loading />;
+  return (
+    <div>
+      <PageHeader title="Avis clients" subtitle="Suppression des avis et produits à vérifier" />
+      {data.flagged_products.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4" data-testid="flagged-review-products">
+          <div className="font-semibold text-sm text-red-800 mb-2">Produits avec avis négatifs à vérifier</div>
+          <ul className="space-y-1 text-sm">
+            {data.flagged_products.map((p) => (
+              <li key={p.id} className="flex items-center gap-2">
+                <span className="font-medium">{p.name}</span>
+                <span className="text-xs text-muted-foreground">{p.shop_name} · {p.review_avg}/5 ({p.review_count} avis, {p.negative_review_count} négatif(s))</span>
+                <Button size="sm" variant="outline" className="rounded-full ml-auto" onClick={() => window.open(`/products/${p.id}`, "_blank")}>Voir</Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <label className="flex items-center gap-2 text-sm mb-3"><Checkbox checked={onlyNeg} onCheckedChange={(v) => setOnlyNeg(!!v)} /> Avis négatifs uniquement (≤ 2/5)</label>
+      {data.reviews.length === 0 ? <EmptyState title="Aucun avis" /> : (
+        <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
+          <Table>
+            <TableHeader><TableRow><TableHead>Produit</TableHead><TableHead>Note</TableHead><TableHead>Avis</TableHead><TableHead>Client</TableHead><TableHead></TableHead></TableRow></TableHeader>
+            <TableBody>
+              {data.reviews.map((r) => (
+                <TableRow key={r.id} data-testid={`review-${r.id}`}>
+                  <TableCell className="text-sm font-medium">{r.product_name}</TableCell>
+                  <TableCell className={r.rating <= 2 ? "text-red-700 font-semibold" : ""}>{r.rating}/5</TableCell>
+                  <TableCell className="text-xs max-w-xs">{r.comment || "—"}</TableCell>
+                  <TableCell className="text-xs">{r.user_name}</TableCell>
+                  <TableCell><Button size="sm" variant="destructive" className="rounded-full" onClick={() => del(r)} data-testid={`delete-review-${r.id}`}><Trash2 className="w-4 h-4 mr-1" /> Supprimer</Button></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---------------- Module 4: Reversements vendeurs & export comptable ----------------
 export function AdminEarnings() {
