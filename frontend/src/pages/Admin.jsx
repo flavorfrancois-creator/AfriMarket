@@ -1144,12 +1144,13 @@ export function AdminAudit() {
 
 
 // ---------------- Module 9: Gestionnaires (RBAC) ----------------
-const emptyStaff = { name: "", email: "", password: "", role: "MODERATOR", permissions: {}, shop_ids: [] };
+const emptyStaff = { name: "", email: "", password: "", role: "MODERATOR", permissions: {}, shop_ids: [], countries: [] };
 
 export function AdminStaff() {
   const [staff, setStaff] = useState(null);
   const [meta, setMeta] = useState(null);
   const [shops, setShops] = useState([]);
+  const [allCountries, setAllCountries] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyStaff);
@@ -1159,6 +1160,7 @@ export function AdminStaff() {
     load();
     api.get("/admin/rbac/meta").then((r) => setMeta(r.data)).catch(() => {});
     api.get("/admin/shops").then((r) => setShops(r.data.shops)).catch(() => {});
+    api.get("/config/countries").then((r) => setAllCountries(r.data.countries || [])).catch(() => {});
   }, []);
 
   const modules = meta?.modules || [];
@@ -1172,7 +1174,7 @@ export function AdminStaff() {
   const openEdit = (s) => {
     const perms = {}; modules.forEach((m) => { perms[m.key] = (s.permissions || []).includes(m.key); });
     setEditing(s);
-    setForm({ name: s.name, email: s.email, password: "", role: s.role, permissions: perms, shop_ids: s.shop_ids || [],
+    setForm({ name: s.name, email: s.email, password: "", role: s.role, permissions: perms, shop_ids: s.shop_ids || [], countries: s.countries || [],
       status: s.status, delegation: s.delegation || { enabled: false } });
     setOpen(true);
   };
@@ -1183,16 +1185,18 @@ export function AdminStaff() {
   const togglePerm = (k) => setForm((f) => ({ ...f, permissions: { ...f.permissions, [k]: !f.permissions[k] } }));
   const toggleShop = (id) => setForm((f) => ({ ...f, shop_ids: f.shop_ids.includes(id) ? f.shop_ids.filter((x) => x !== id) : [...f.shop_ids, id] }));
 
+  const toggleCountry = (c) => setForm((f) => ({ ...f, countries: f.countries.includes(c) ? f.countries.filter((x) => x !== c) : [...f.countries, c] }));
+
   const save = async () => {
     try {
       if (editing) {
         await api.put(`/admin/staff/${editing.id}`, {
-          role: form.role, permissions: form.permissions, shop_ids: form.shop_ids,
+          role: form.role, permissions: form.permissions, shop_ids: form.shop_ids, countries: form.countries,
           status: form.status, delegation: form.delegation, password: form.password || undefined,
         });
         toast.success("Gestionnaire mis à jour");
       } else {
-        await api.post("/admin/staff", { name: form.name, email: form.email, password: form.password, role: form.role, permissions: form.permissions, shop_ids: form.shop_ids });
+        await api.post("/admin/staff", { name: form.name, email: form.email, password: form.password, role: form.role, permissions: form.permissions, shop_ids: form.shop_ids, countries: form.countries });
         toast.success("Gestionnaire créé");
       }
       setOpen(false); load();
@@ -1210,7 +1214,7 @@ export function AdminStaff() {
         action={<Button className="rounded-full" onClick={openCreate} data-testid="new-staff-btn"><UserCog className="w-4 h-4 mr-1" /> Nouveau gestionnaire</Button>} />
       <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
         <Table>
-          <TableHeader><TableRow><TableHead>Nom</TableHead><TableHead>E-mail</TableHead><TableHead>Rôle</TableHead><TableHead>Modules</TableHead><TableHead>Boutiques</TableHead><TableHead>Statut</TableHead><TableHead></TableHead></TableRow></TableHeader>
+          <TableHeader><TableRow><TableHead>Nom</TableHead><TableHead>E-mail</TableHead><TableHead>Rôle</TableHead><TableHead>Modules</TableHead><TableHead>Boutiques</TableHead><TableHead>Pays</TableHead><TableHead>Statut</TableHead><TableHead></TableHead></TableRow></TableHeader>
           <TableBody>
             {staff.map((s) => (
               <TableRow key={s.id} data-testid={`staff-row-${s.id}`}>
@@ -1219,6 +1223,7 @@ export function AdminStaff() {
                 <TableCell><span className="text-xs font-mono bg-accent px-2 py-0.5 rounded-full">{ROLE_LABELS[s.role] || s.role}</span></TableCell>
                 <TableCell className="text-xs text-muted-foreground">{s.role === "SUPER_ADMIN" ? "Tous" : (s.permissions || []).length}</TableCell>
                 <TableCell className="text-xs">{(s.shop_ids || []).length || "—"}</TableCell>
+                <TableCell className="text-xs" data-testid={`staff-countries-${s.id}`}>{(s.countries || []).length ? s.countries.join(", ") : "Tous"}</TableCell>
                 <TableCell><StatusBadge status={s.status || "ACTIVE"} /></TableCell>
                 <TableCell>
                   {s.role !== "SUPER_ADMIN" && (
@@ -1279,6 +1284,18 @@ export function AdminStaff() {
                   <label key={m.key} className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox checked={!!form.permissions[m.key]} onCheckedChange={() => togglePerm(m.key)} data-testid={`perm-${m.key}`} />
                     {m.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label className="mb-1 block">Pays attribués</Label>
+              <p className="text-xs text-muted-foreground mb-2">Le gestionnaire n'aura accès qu'aux données de ces pays. Aucun pays sélectionné = tous les pays.</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 border border-border rounded-lg p-3 max-h-44 overflow-y-auto" data-testid="staff-countries">
+                {allCountries.map((c) => (
+                  <label key={c.iso2} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <Checkbox checked={form.countries.includes(c.name)} onCheckedChange={() => toggleCountry(c.name)} data-testid={`staff-country-${c.iso2}`} />
+                    {c.name}
                   </label>
                 ))}
               </div>
@@ -1606,8 +1623,18 @@ export function AdminProducts() {
   const approve = async (p) => { try { await api.put(`/admin/products/${p.id}/moderate`, { decision: "APPROVE" }); toast.success("Produit validé"); load(tab); } catch (e) { toast.error(apiErr(e)); } };
   const doReject = async () => { try { await api.put(`/admin/products/${reject.id}/moderate`, { decision: "REJECT", reason }); toast.success("Produit refusé"); setReject(null); setReason(""); load(tab); } catch (e) { toast.error(apiErr(e)); } };
 
+  const [catTab, setCatTab] = useState(null);
+  const [search, setSearch] = useState("");
+  const [layout, setLayout] = useState(() => localStorage.getItem("am_mod_layout") || "columns");
+  const [size, setSize] = useState(() => localStorage.getItem("am_mod_size") || "medium");
+  const [subTab, setSubTab] = useState({});
+  const pick = (setter, key) => (v) => { setter(v); localStorage.setItem(key, v); };
+
   const groups = {};
-  (items || []).forEach((p) => {
+  const needle = search.trim().toLowerCase();
+  const visible = (items || []).filter((p) => !needle
+    || [p.name, p.shop_name, p.sku, p.category, p.subcategory].some((v) => (v || "").toLowerCase().includes(needle)));
+  visible.forEach((p) => {
     const c = p.category || "Sans catégorie";
     const sc = p.subcategory || "Sans sous-catégorie";
     groups[c] = groups[c] || { count: 0, subs: {} };
@@ -1615,8 +1642,80 @@ export function AdminProducts() {
     (groups[c].subs[sc] = groups[c].subs[sc] || []).push(p);
   });
   const catNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
-  const [catTab, setCatTab] = useState(null);
-  useEffect(() => { if (catNames.length && !catNames.includes(catTab)) setCatTab(catNames[0]); }, [items]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (catNames.length && !catNames.includes(catTab)) setCatTab(catNames[0]); }, [items, search]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const SIZES = {
+    large: { col: "min-w-[360px] w-[360px]", img: "w-20 h-20", name: "text-base", grid: "grid-cols-1" },
+    medium: { col: "min-w-[260px] w-[260px]", img: "w-10 h-10", name: "text-sm", grid: "grid-cols-1" },
+    small: { col: "min-w-[180px] w-[180px]", img: "w-7 h-7", name: "text-xs", grid: "grid-cols-1" },
+  };
+  const sz = SIZES[size] || SIZES.medium;
+
+  const renderProduct = (p, row) => (
+    <div key={p.id} className={`bg-card border border-border rounded-lg p-2 ${row ? "flex items-center gap-3 flex-wrap" : ""}`} data-testid={`mod-product-${p.id}`}>
+      <div className="flex items-start gap-2 min-w-0 flex-1">
+        {p.image ? <img src={p.image} alt="" className={`${sz.img} rounded object-cover shrink-0`} /> : null}
+        <div className="min-w-0">
+          <div className={`${sz.name} font-medium leading-tight line-clamp-2`}>{p.name}</div>
+          {size !== "small" && <div className="text-[11px] text-muted-foreground">{p.shop_name} · {money(p.price_simple, p.currency)}</div>}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1 mt-1.5">
+        <StatusBadge status={p.has_pending_update ? "PENDING" : (p.moderation_status || "APPROVED")} />
+        {p.has_pending_update && size !== "small" && <span className="text-[10px] text-muted-foreground">Version en attente</span>}
+        {p.flagged && <span className="text-[10px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded-full">SIGNALÉ</span>}
+        {(p.report_count || 0) > 0 && size !== "small" && <span className="text-[10px] text-muted-foreground">{p.report_count} signalement(s)</span>}
+      </div>
+      <div className="flex items-center mt-2">
+        {(p.moderation_status !== "APPROVED" || p.has_pending_update) && <Button size="sm" className="rounded-full mr-1 h-7 px-2" onClick={() => approve(p)} data-testid={`approve-product-${p.id}`}><CheckCircle2 className="w-4 h-4 mr-1" />{size !== "small" && " Valider"}</Button>}
+        <Button size="sm" variant="outline" className="rounded-full mr-1 h-7 px-2" onClick={() => window.open(`/products/${p.id}?preview=pending`, "_blank", "noopener,noreferrer")} data-testid={`preview-product-${p.id}`}><Eye className="w-4 h-4 mr-1" />{size !== "small" && " Aperçu"}</Button>
+        {(p.moderation_status !== "REJECTED" || p.has_pending_update) && <Button size="sm" variant="ghost" className="text-destructive h-7 px-2" onClick={() => { setReject(p); setReason(""); }} data-testid={`reject-product-${p.id}`}><XCircle className="w-4 h-4" /></Button>}
+      </div>
+    </div>
+  );
+
+  const renderSubs = (c) => {
+    const subs = Object.keys(groups[c].subs).sort((a, b) => a.localeCompare(b));
+    const gridCols = size === "large" ? "sm:grid-cols-1" : size === "small" ? "sm:grid-cols-3 lg:grid-cols-4" : "sm:grid-cols-2";
+    if (layout === "list") {
+      return (
+        <div className="space-y-4" data-testid={`mod-list-${c}`}>
+          {subs.map((sub) => (
+            <div key={sub} data-testid={`mod-sub-${sub}`}>
+              <div className="text-sm font-semibold mb-2">{sub} <span className="text-xs text-muted-foreground">({groups[c].subs[sub].length})</span></div>
+              <div className="space-y-2">{groups[c].subs[sub].map((p) => renderProduct(p, true))}</div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    if (layout === "tabs") {
+      const cur = subs.includes(subTab[c]) ? subTab[c] : subs[0];
+      return (
+        <Tabs value={cur} onValueChange={(v) => setSubTab((t) => ({ ...t, [c]: v }))} data-testid={`mod-subtabs-${c}`}>
+          <TabsList className="flex-wrap h-auto mb-3">
+            {subs.map((sub) => <TabsTrigger key={sub} value={sub} data-testid={`mod-subtab-${sub}`}>{sub} <span className="ml-1 text-[10px] text-muted-foreground">({groups[c].subs[sub].length})</span></TabsTrigger>)}
+          </TabsList>
+          {subs.map((sub) => (
+            <TabsContent key={sub} value={sub}>
+              <div className={`grid grid-cols-1 ${gridCols} gap-2`}>{groups[c].subs[sub].map((p) => renderProduct(p, false))}</div>
+            </TabsContent>
+          ))}
+        </Tabs>
+      );
+    }
+    return (
+      <div className="flex gap-4 overflow-x-auto pb-2" data-testid={`mod-subcols-${c}`}>
+        {subs.map((sub) => (
+          <div key={sub} className={`${sz.col} shrink-0 bg-muted/40 border border-border rounded-xl p-2`} data-testid={`mod-sub-${sub}`}>
+            <div className="px-1 pb-2 text-sm font-semibold">{sub} <span className="text-xs text-muted-foreground">({groups[c].subs[sub].length})</span></div>
+            <div className="space-y-2">{groups[c].subs[sub].map((p) => renderProduct(p, false))}</div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   if (items === null) return <Loading />;
   return (
     <div>
@@ -1629,48 +1728,29 @@ export function AdminProducts() {
           <TabsTrigger value="ALL" data-testid="tab-all">Tous</TabsTrigger>
         </TabsList>
       </Tabs>
-      {items.length === 0 ? <EmptyState title="Aucun produit" /> : (
-        <Tabs value={catTab} onValueChange={setCatTab} className="mb-4" data-testid="mod-category-tabs">
+      <div className="flex flex-wrap items-center gap-3 mb-4" data-testid="mod-toolbar">
+        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un produit, une boutique, un SKU..." className="max-w-xs" data-testid="mod-search" />
+        <div className="flex items-center gap-1" data-testid="mod-layout">
+          <span className="text-xs text-muted-foreground mr-1">Sous-catégories :</span>
+          {[["list", "Listes"], ["columns", "Colonnes"], ["tabs", "Onglets"]].map(([k, l]) => (
+            <Button key={k} size="sm" variant={layout === k ? "default" : "outline"} className="rounded-full h-8" onClick={() => pick(setLayout, "am_mod_layout")(k)} data-testid={`layout-${k}`}>{l}</Button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1" data-testid="mod-size">
+          <span className="text-xs text-muted-foreground mr-1">Affichage :</span>
+          {[["large", "Grand"], ["medium", "Moyen"], ["small", "Petit"]].map(([k, l]) => (
+            <Button key={k} size="sm" variant={size === k ? "default" : "outline"} className="rounded-full h-8" onClick={() => pick(setSize, "am_mod_size")(k)} data-testid={`size-${k}`}>{l}</Button>
+          ))}
+        </div>
+      </div>
+      {visible.length === 0 ? <EmptyState title="Aucun produit" /> : (
+        <Tabs value={catTab || catNames[0]} onValueChange={setCatTab} className="mb-4" data-testid="mod-category-tabs">
           <TabsList className="flex-wrap h-auto">
             {catNames.map((c) => (
               <TabsTrigger key={c} value={c} data-testid={`mod-cat-${c}`}>{c} <span className="ml-1 text-[10px] text-muted-foreground">({groups[c].count})</span></TabsTrigger>
             ))}
           </TabsList>
-          {catNames.map((c) => (
-            <TabsContent key={c} value={c}>
-              <div className="flex gap-4 overflow-x-auto pb-2" data-testid={`mod-subcols-${c}`}>
-                {Object.keys(groups[c].subs).sort((a, b) => a.localeCompare(b)).map((sub) => (
-                  <div key={sub} className="min-w-[260px] w-[260px] shrink-0 bg-muted/40 border border-border rounded-xl p-2" data-testid={`mod-sub-${sub}`}>
-                    <div className="px-1 pb-2 text-sm font-semibold">{sub} <span className="text-xs text-muted-foreground">({groups[c].subs[sub].length})</span></div>
-                    <div className="space-y-2">
-                      {groups[c].subs[sub].map((p) => (
-                        <div key={p.id} className="bg-card border border-border rounded-lg p-2" data-testid={`mod-product-${p.id}`}>
-                          <div className="flex items-start gap-2">
-                            {p.image ? <img src={p.image} alt="" className="w-10 h-10 rounded object-cover" /> : null}
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium leading-tight line-clamp-2">{p.name}</div>
-                              <div className="text-[11px] text-muted-foreground">{p.shop_name} · {money(p.price_simple, p.currency)}</div>
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-1 mt-1.5">
-                            <StatusBadge status={p.has_pending_update ? "PENDING" : (p.moderation_status || "APPROVED")} />
-                            {p.has_pending_update && <span className="text-[10px] text-muted-foreground">Version en attente</span>}
-                            {p.flagged && <span className="text-[10px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded-full">SIGNALÉ</span>}
-                            {(p.report_count || 0) > 0 && <span className="text-[10px] text-muted-foreground">{p.report_count} signalement(s)</span>}
-                          </div>
-                          <div className="flex items-center mt-2">
-                            {(p.moderation_status !== "APPROVED" || p.has_pending_update) && <Button size="sm" className="rounded-full mr-1 h-7 px-2" onClick={() => approve(p)} data-testid={`approve-product-${p.id}`}><CheckCircle2 className="w-4 h-4 mr-1" /> Valider</Button>}
-                            <Button size="sm" variant="outline" className="rounded-full mr-1 h-7 px-2" onClick={() => window.open(`/products/${p.id}?preview=pending`, "_blank", "noopener,noreferrer")} data-testid={`preview-product-${p.id}`}><Eye className="w-4 h-4 mr-1" /> Aperçu</Button>
-                            {(p.moderation_status !== "REJECTED" || p.has_pending_update) && <Button size="sm" variant="ghost" className="text-destructive h-7 px-2" onClick={() => { setReject(p); setReason(""); }} data-testid={`reject-product-${p.id}`}><XCircle className="w-4 h-4" /></Button>}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </TabsContent>
-          ))}
+          {catNames.map((c) => <TabsContent key={c} value={c}>{renderSubs(c)}</TabsContent>)}
         </Tabs>
       )}
       <Dialog open={!!reject} onOpenChange={(o) => !o && setReject(null)}>

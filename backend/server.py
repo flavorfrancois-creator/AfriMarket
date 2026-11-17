@@ -99,12 +99,14 @@ class StaffCreateReq(BaseModel):
     role: str
     permissions: Optional[dict] = None
     shop_ids: List[str] = []
+    countries: List[str] = []
 
 
 class StaffUpdateReq(BaseModel):
     role: Optional[str] = None
     permissions: Optional[dict] = None
     shop_ids: Optional[List[str]] = None
+    countries: Optional[List[str]] = None
     status: Optional[str] = None
     delegation: Optional[dict] = None
     password: Optional[str] = None
@@ -434,6 +436,7 @@ def _user_public(user: dict) -> dict:
         "is_demo": user.get("is_demo", False),
         "status": user.get("status", "ACTIVE"),
         "shop_ids": user.get("shop_ids", []),
+        "countries": user.get("countries", []),
         "delegation": user.get("delegation") or {},
         "two_factor_enabled": bool(
             user.get("two_factor_enabled", False)
@@ -3608,11 +3611,34 @@ async def admin_overview(user: dict = Depends(require_module("overview"))):
     }
 
 
+def _staff_countries(user: dict):
+    """Countries a staff member is restricted to; None means unrestricted."""
+    if user.get("role") in ("SUPER_ADMIN",):
+        return None
+    return list(user.get("countries") or []) or None
+
+
+async def _staff_shop_ids(user: dict):
+    countries = _staff_countries(user)
+    if countries is None:
+        return None
+    return [s["id"] async for s in db.shops.find({"country": {"$in": countries}}, {"id": 1})]
+
+
+async def _assert_shop_in_scope(user: dict, shop_id):
+    ids = await _staff_shop_ids(user)
+    if ids is not None and shop_id not in ids:
+        raise HTTPException(status_code=403, detail="Ce pays ne fait pas partie de votre périmètre")
+
+
 @api.get("/admin/shops")
 async def admin_shops(status: Optional[str] = None, user: dict = Depends(require_module("shops"))):
     query = {}
     if status:
         query["status"] = status
+    countries = _staff_countries(user)
+    if countries is not None:
+        query["country"] = {"$in": countries}
     shops = await db.shops.find(query).sort("created_at", -1).to_list(500)
     result = []
     for s in shops:
@@ -3844,7 +3870,8 @@ async def admin_kyc_document(user_id: str, user: dict = Depends(require_module("
 
 @api.get("/admin/users")
 async def admin_users(user: dict = Depends(require_module("users"))):
-    users = await db.users.find({}).sort("created_at", -1).to_list(1000)
+    countries = _staff_countries(user)
+    users = await db.users.find({"country": {"$in": countries}} if countries is not None else {}).sort("created_at", -1).to_list(1000)
     return {"users": [_user_public(u) for u in users]}
 
 
@@ -3924,6 +3951,9 @@ async def admin_orders(shop_id: Optional[str] = None, status: Optional[str] = No
     query = {}
     if shop_id:
         query["shop_id"] = shop_id
+    scope_ids = await _staff_shop_ids(user)
+    if scope_ids is not None:
+        query["shop_id"] = {"$in": [shop_id] if shop_id and shop_id in scope_ids else ([] if shop_id else scope_ids)}
     if status:
         query["status"] = status
     if carrier_id:
@@ -4214,13 +4244,17 @@ async def post_product_review(product_id: str, req: ProductReviewReq, user: dict
 async def admin_reviews(product_id: Optional[str] = None, negative: Optional[bool] = None,
                         user: dict = Depends(require_module("moderation"))):
     query = {}
+    scope_ids = await _staff_shop_ids(user)
+    if scope_ids is not None:
+        query["shop_id"] = {"$in": scope_ids}
     if product_id:
         query["product_id"] = product_id
     if negative:
         query["rating"] = {"$lte": 2}
     reviews = await db.product_reviews.find(query).sort("created_at", -1).to_list(500)
     flagged = await db.products.find(
-        {"negative_review_count": {"$gt": 0}, "status": {"$ne": "DELETED"}},
+        {"negative_review_count": {"$gt": 0}, "status": {"$ne": "DELETED"},
+         **({"shop_id": {"$in": scope_ids}} if scope_ids is not None else {})},
         {"id": 1, "name": 1, "shop_name": 1, "review_avg": 1, "review_count": 1, "negative_review_count": 1}
     ).sort("negative_review_count", -1).to_list(200)
     return {"reviews": [serialize(r) for r in reviews], "flagged_products": [serialize(p) for p in flagged]}
@@ -4231,6 +4265,7 @@ async def admin_delete_review(review_id: str, user: dict = Depends(require_modul
     review = await db.product_reviews.find_one({"id": review_id})
     if not review:
         raise HTTPException(status_code=404, detail="Avis introuvable")
+    await _assert_shop_in_scope(user, review.get("shop_id"))
     await db.product_reviews.delete_one({"id": review_id})
     count, negative, avg = await _refresh_review_stats(review["product_id"])
     return {"message": "Avis supprimé", "count": count, "average": avg}
@@ -4249,6 +4284,9 @@ async def admin_products(status: Optional[str] = None, flagged: Optional[bool] =
         query["moderation_status"] = status
     if flagged is not None:
         query["flagged"] = flagged
+    scope_ids = await _staff_shop_ids(user)
+    if scope_ids is not None:
+        query["shop_id"] = {"$in": scope_ids}
     products = await db.products.find(query).sort("created_at", -1).to_list(500)
     out = []
     for p in products:
@@ -4264,6 +4302,7 @@ async def admin_product_preview(product_id: str, user: dict = Depends(require_mo
     product = await db.products.find_one({"id": product_id, "status": {"$ne": "DELETED"}})
     if not product:
         raise HTTPException(status_code=404, detail="Article introuvable")
+    await _assert_shop_in_scope(user, product.get("shop_id"))
     candidate = _pending_product_view(product)
     result = _public_product(candidate, "SIMPLE")
     result["preview"] = True
@@ -4277,6 +4316,7 @@ async def moderate_product(product_id: str, req: ProductModerateReq, request: Re
     product = await db.products.find_one({"id": product_id})
     if not product:
         raise HTTPException(status_code=404, detail="Article introuvable")
+    await _assert_shop_in_scope(user, product.get("shop_id"))
     decision = req.decision.upper()
     if decision not in ("APPROVE", "REJECT"):
         raise HTTPException(status_code=400, detail="Décision invalide")
@@ -4324,6 +4364,9 @@ async def moderate_product(product_id: str, req: ProductModerateReq, request: Re
 @api.get("/admin/reports")
 async def admin_reports(status: Optional[str] = "OPEN", user: dict = Depends(require_module("moderation"))):
     query = {} if status == "ALL" else {"status": status or "OPEN"}
+    scope_ids = await _staff_shop_ids(user)
+    if scope_ids is not None:
+        query["shop_id"] = {"$in": scope_ids}
     reports = await db.product_reports.find(query).sort("created_at", -1).to_list(500)
     return {"reports": [serialize(r) for r in reports]}
 
@@ -4334,6 +4377,7 @@ async def resolve_report(report_id: str, req: ReportActionReq, request: Request,
     report = await db.product_reports.find_one({"id": report_id})
     if not report:
         raise HTTPException(status_code=404, detail="Signalement introuvable")
+    await _assert_shop_in_scope(user, report.get("shop_id"))
     action = req.action.upper()
     if action not in ("DISMISS", "REJECT_PRODUCT"):
         raise HTTPException(status_code=400, detail="Action invalide")
@@ -4445,6 +4489,7 @@ async def create_staff(req: StaffCreateReq, request: Request, user: dict = Depen
         "phone_verified": True, "email_verified": True, "kyc_status": "NONE",
         "invite_code": gen_invite_code(), "is_partner": False,
         "status": "ACTIVE", "permissions": perms, "shop_ids": req.shop_ids or [],
+        "countries": sorted({c.strip() for c in req.countries if c.strip()}),
         "delegation": {"enabled": False}, "two_factor_enabled": False, "two_factor_channel": "email",
         "created_at": now_iso(), "created_by": user["id"],
     }
@@ -4472,6 +4517,8 @@ async def update_staff(sid: str, req: StaffUpdateReq, request: Request, user: di
         upd["permissions"] = {m: bool(req.permissions.get(m)) for m in rbac.MODULES}; bump = True
     if req.shop_ids is not None:
         upd["shop_ids"] = req.shop_ids
+    if req.countries is not None:
+        upd["countries"] = sorted({c.strip() for c in req.countries if c.strip()}); bump = True
     if req.status is not None:
         if req.status not in ("ACTIVE", "SUSPENDED", "DISABLED"):
             raise HTTPException(status_code=400, detail="Statut invalide")
