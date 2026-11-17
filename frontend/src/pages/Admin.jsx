@@ -1606,6 +1606,17 @@ export function AdminProducts() {
   const approve = async (p) => { try { await api.put(`/admin/products/${p.id}/moderate`, { decision: "APPROVE" }); toast.success("Produit validé"); load(tab); } catch (e) { toast.error(apiErr(e)); } };
   const doReject = async () => { try { await api.put(`/admin/products/${reject.id}/moderate`, { decision: "REJECT", reason }); toast.success("Produit refusé"); setReject(null); setReason(""); load(tab); } catch (e) { toast.error(apiErr(e)); } };
 
+  const groups = {};
+  (items || []).forEach((p) => {
+    const c = p.category || "Sans catégorie";
+    const sc = p.subcategory || "Sans sous-catégorie";
+    groups[c] = groups[c] || { count: 0, subs: {} };
+    groups[c].count += 1;
+    (groups[c].subs[sc] = groups[c].subs[sc] || []).push(p);
+  });
+  const catNames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+  const [catTab, setCatTab] = useState(null);
+  useEffect(() => { if (catNames.length && !catNames.includes(catTab)) setCatTab(catNames[0]); }, [items]); // eslint-disable-line react-hooks/exhaustive-deps
   if (items === null) return <Loading />;
   return (
     <div>
@@ -1619,33 +1630,48 @@ export function AdminProducts() {
         </TabsList>
       </Tabs>
       {items.length === 0 ? <EmptyState title="Aucun produit" /> : (
-        <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
-          <Table>
-            <TableHeader><TableRow><TableHead>Produit</TableHead><TableHead>Boutique</TableHead><TableHead className="text-right">Prix</TableHead><TableHead>Signalements</TableHead><TableHead>Modération</TableHead><TableHead></TableHead></TableRow></TableHeader>
-            <TableBody>
-              {items.map((p) => (
-                <TableRow key={p.id} data-testid={`mod-product-${p.id}`}>
-                  <TableCell className="font-medium text-sm flex items-center gap-2">
-                    {p.image ? <img src={p.image} alt="" className="w-8 h-8 rounded object-cover" /> : null}
-                    {p.name} {p.flagged && <span className="text-[10px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded-full">SIGNALÉ</span>}
-                  </TableCell>
-                  <TableCell className="text-sm">{p.shop_name}</TableCell>
-                  <TableCell className="text-right font-mono text-sm">{money(p.price_simple, p.currency)}</TableCell>
-                  <TableCell className="text-sm">{p.report_count || 0}</TableCell>
-                  <TableCell>
-                    <StatusBadge status={p.has_pending_update ? "PENDING" : (p.moderation_status || "APPROVED")} />
-                    {p.has_pending_update && <span className="block text-[10px] text-muted-foreground mt-1">Version en attente</span>}
-                  </TableCell>
-                  <TableCell>
-                    {(p.moderation_status !== "APPROVED" || p.has_pending_update) && <Button size="sm" className="rounded-full mr-1" onClick={() => approve(p)} data-testid={`approve-product-${p.id}`}><CheckCircle2 className="w-4 h-4 mr-1" /> Valider</Button>}
-                    {<Button size="sm" variant="outline" className="rounded-full mr-1" onClick={() => window.open(`/products/${p.id}?preview=pending`, "_blank", "noopener,noreferrer")} data-testid={`preview-product-${p.id}`}><Eye className="w-4 h-4 mr-1" /> Aperçu</Button>}
-                    {(p.moderation_status !== "REJECTED" || p.has_pending_update) && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => { setReject(p); setReason(""); }} data-testid={`reject-product-${p.id}`}><XCircle className="w-4 h-4" /></Button>}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <Tabs value={catTab} onValueChange={setCatTab} className="mb-4" data-testid="mod-category-tabs">
+          <TabsList className="flex-wrap h-auto">
+            {catNames.map((c) => (
+              <TabsTrigger key={c} value={c} data-testid={`mod-cat-${c}`}>{c} <span className="ml-1 text-[10px] text-muted-foreground">({groups[c].count})</span></TabsTrigger>
+            ))}
+          </TabsList>
+          {catNames.map((c) => (
+            <TabsContent key={c} value={c}>
+              <div className="flex gap-4 overflow-x-auto pb-2" data-testid={`mod-subcols-${c}`}>
+                {Object.keys(groups[c].subs).sort((a, b) => a.localeCompare(b)).map((sub) => (
+                  <div key={sub} className="min-w-[260px] w-[260px] shrink-0 bg-muted/40 border border-border rounded-xl p-2" data-testid={`mod-sub-${sub}`}>
+                    <div className="px-1 pb-2 text-sm font-semibold">{sub} <span className="text-xs text-muted-foreground">({groups[c].subs[sub].length})</span></div>
+                    <div className="space-y-2">
+                      {groups[c].subs[sub].map((p) => (
+                        <div key={p.id} className="bg-card border border-border rounded-lg p-2" data-testid={`mod-product-${p.id}`}>
+                          <div className="flex items-start gap-2">
+                            {p.image ? <img src={p.image} alt="" className="w-10 h-10 rounded object-cover" /> : null}
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium leading-tight line-clamp-2">{p.name}</div>
+                              <div className="text-[11px] text-muted-foreground">{p.shop_name} · {money(p.price_simple, p.currency)}</div>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                            <StatusBadge status={p.has_pending_update ? "PENDING" : (p.moderation_status || "APPROVED")} />
+                            {p.has_pending_update && <span className="text-[10px] text-muted-foreground">Version en attente</span>}
+                            {p.flagged && <span className="text-[10px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded-full">SIGNALÉ</span>}
+                            {(p.report_count || 0) > 0 && <span className="text-[10px] text-muted-foreground">{p.report_count} signalement(s)</span>}
+                          </div>
+                          <div className="flex items-center mt-2">
+                            {(p.moderation_status !== "APPROVED" || p.has_pending_update) && <Button size="sm" className="rounded-full mr-1 h-7 px-2" onClick={() => approve(p)} data-testid={`approve-product-${p.id}`}><CheckCircle2 className="w-4 h-4 mr-1" /> Valider</Button>}
+                            <Button size="sm" variant="outline" className="rounded-full mr-1 h-7 px-2" onClick={() => window.open(`/products/${p.id}?preview=pending`, "_blank", "noopener,noreferrer")} data-testid={`preview-product-${p.id}`}><Eye className="w-4 h-4 mr-1" /> Aperçu</Button>
+                            {(p.moderation_status !== "REJECTED" || p.has_pending_update) && <Button size="sm" variant="ghost" className="text-destructive h-7 px-2" onClick={() => { setReject(p); setReason(""); }} data-testid={`reject-product-${p.id}`}><XCircle className="w-4 h-4" /></Button>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </TabsContent>
+          ))}
+        </Tabs>
       )}
       <Dialog open={!!reject} onOpenChange={(o) => !o && setReject(null)}>
         <DialogContent>
