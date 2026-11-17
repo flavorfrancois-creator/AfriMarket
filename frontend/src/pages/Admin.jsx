@@ -24,6 +24,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -1616,9 +1617,20 @@ export function AdminProducts() {
   const [tab, setTab] = useState("PENDING");
   const [reject, setReject] = useState(null);
   const [reason, setReason] = useState("");
-  const load = (status) => api.get(`/admin/products${status && status !== "ALL" ? `?status=${status}` : ""}`)
-    .then((r) => setItems(r.data.products)).catch(() => setItems([]));
-  useEffect(() => { load(tab); }, [tab]);
+  const { user: me } = useAuth();
+  const myCountries = me?.role === "SUPER_ADMIN" ? [] : (me?.countries || []);
+  const [allCountries, setAllCountries] = useState([]);
+  const [country, setCountry] = useState("ALL");
+  useEffect(() => { api.get("/config/countries").then((r) => setAllCountries(r.data.countries || [])).catch(() => {}); }, []);
+  const countryOptions = myCountries.length ? myCountries : allCountries.map((c) => c.name);
+  const load = (status) => {
+    const qs = [];
+    if (status && status !== "ALL") qs.push(`status=${status}`);
+    if (country !== "ALL") qs.push(`country=${encodeURIComponent(country)}`);
+    return api.get(`/admin/products${qs.length ? `?${qs.join("&")}` : ""}`)
+      .then((r) => setItems(r.data.products)).catch(() => setItems([]));
+  };
+  useEffect(() => { load(tab); }, [tab, country]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const approve = async (p) => { try { await api.put(`/admin/products/${p.id}/moderate`, { decision: "APPROVE" }); toast.success("Produit validé"); load(tab); } catch (e) { toast.error(apiErr(e)); } };
   const doReject = async () => { try { await api.put(`/admin/products/${reject.id}/moderate`, { decision: "REJECT", reason }); toast.success("Produit refusé"); setReject(null); setReason(""); load(tab); } catch (e) { toast.error(apiErr(e)); } };
@@ -1730,18 +1742,29 @@ export function AdminProducts() {
       </Tabs>
       <div className="flex flex-wrap items-center gap-3 mb-4" data-testid="mod-toolbar">
         <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un produit, une boutique, un SKU..." className="max-w-xs" data-testid="mod-search" />
-        <div className="flex items-center gap-1" data-testid="mod-layout">
-          <span className="text-xs text-muted-foreground mr-1">Sous-catégories :</span>
-          {[["list", "Listes"], ["columns", "Colonnes"], ["tabs", "Onglets"]].map(([k, l]) => (
-            <Button key={k} size="sm" variant={layout === k ? "default" : "outline"} className="rounded-full h-8" onClick={() => pick(setLayout, "am_mod_layout")(k)} data-testid={`layout-${k}`}>{l}</Button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1" data-testid="mod-size">
-          <span className="text-xs text-muted-foreground mr-1">Affichage :</span>
-          {[["large", "Grand"], ["medium", "Moyen"], ["small", "Petit"]].map(([k, l]) => (
-            <Button key={k} size="sm" variant={size === k ? "default" : "outline"} className="rounded-full h-8" onClick={() => pick(setSize, "am_mod_size")(k)} data-testid={`size-${k}`}>{l}</Button>
-          ))}
-        </div>
+        <Select value={country} onValueChange={setCountry}>
+          <SelectTrigger className="w-52" data-testid="mod-country"><SelectValue placeholder="Pays" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">{myCountries.length ? "Tous mes pays" : "Tous les pays"}</SelectItem>
+            {countryOptions.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="outline" className="rounded-full h-9" data-testid="mod-layout">SOUS-CATÉGORIES : {({ list: "LISTES", tabs: "ONGLETS", columns: "COLONNES" })[layout]}</Button></DropdownMenuTrigger>
+          <DropdownMenuContent>
+            {[["list", "LISTES"], ["tabs", "ONGLETS"], ["columns", "COLONNES"]].map(([k, l]) => (
+              <DropdownMenuItem key={k} onClick={() => pick(setLayout, "am_mod_layout")(k)} data-testid={`layout-${k}`}>{l}</DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="outline" className="rounded-full h-9" data-testid="mod-size">AFFICHAGE : {({ large: "GRAND", medium: "MOYEN", small: "PETIT" })[size]}</Button></DropdownMenuTrigger>
+          <DropdownMenuContent>
+            {[["large", "GRAND"], ["medium", "MOYEN"], ["small", "PETIT"]].map(([k, l]) => (
+              <DropdownMenuItem key={k} onClick={() => pick(setSize, "am_mod_size")(k)} data-testid={`size-${k}`}>{l}</DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       {visible.length === 0 ? <EmptyState title="Aucun produit" /> : (
         <Tabs value={catTab || catNames[0]} onValueChange={setCatTab} className="mb-4" data-testid="mod-category-tabs">

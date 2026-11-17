@@ -4273,6 +4273,7 @@ async def admin_delete_review(review_id: str, user: dict = Depends(require_modul
 
 @api.get("/admin/products")
 async def admin_products(status: Optional[str] = None, flagged: Optional[bool] = None,
+                         country: Optional[str] = None,
                          user: dict = Depends(require_module("products"))):
     query = {"status": {"$ne": "DELETED"}}
     if status == "PENDING":
@@ -4284,9 +4285,12 @@ async def admin_products(status: Optional[str] = None, flagged: Optional[bool] =
         query["moderation_status"] = status
     if flagged is not None:
         query["flagged"] = flagged
-    scope_ids = await _staff_shop_ids(user)
-    if scope_ids is not None:
-        query["shop_id"] = {"$in": scope_ids}
+    allowed = _staff_countries(user)
+    wanted = [country] if country else None
+    if allowed is not None:
+        wanted = [c for c in (wanted or allowed) if c in allowed]
+    if wanted is not None:
+        query["shop_id"] = {"$in": [sh["id"] async for sh in db.shops.find({"country": {"$in": wanted}}, {"id": 1})]}
     products = await db.products.find(query).sort("created_at", -1).to_list(500)
     out = []
     for p in products:
