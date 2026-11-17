@@ -1383,11 +1383,15 @@ async def _notify_moderators(ntype: str, title: str, message: str, link: str = N
 
 
 @api.get("/products/mine")
-async def my_products(user: dict = Depends(require_roles("MERCHANT"))):
-    shop = await _my_shop(user)
-    if not shop:
+async def my_products(all_shops: bool = False, user: dict = Depends(require_roles("MERCHANT"))):
+    if all_shops:
+        ids = [s["id"] async for s in db.shops.find({"owner_id": user["id"]}, {"id": 1})]
+    else:
+        shop = await _my_shop(user)
+        ids = [shop["id"]] if shop else []
+    if not ids:
         return {"products": []}
-    products = await db.products.find({"shop_id": shop["id"], "status": {"$ne": "DELETED"}}).to_list(500)
+    products = await db.products.find({"shop_id": {"$in": ids}, "status": {"$ne": "DELETED"}}).to_list(2000)
     return {"products": [_merchant_product_view(p) for p in products]}
 
 

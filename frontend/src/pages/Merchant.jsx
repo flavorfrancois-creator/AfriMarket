@@ -25,6 +25,8 @@ import {
   Plus, Pencil, Trash2, Minus, TrendingUp, AlertTriangle, CheckCircle2, Clock, Phone, Mail, IdCard, Store, FileText,
   Check, Upload, X, Image as ImageIcon, Layers, UploadCloud, UserCog, Link2,
 } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { CategoryPicker } from "@/components/CategoryPicker";
 
 const MerchantCtx = createContext(null);
@@ -811,9 +813,105 @@ function SupplierImportDialog({ open, onOpenChange, shop, onPublished }) {
   );
 }
 
+const MP_SIZES = {
+  large: { img: "w-24 h-24", text: "text-base", card: "p-3", col: "w-80" },
+  medium: { img: "w-14 h-14", text: "text-sm", card: "p-2.5", col: "w-64" },
+  small: { img: "w-9 h-9", text: "text-xs", card: "p-1.5", col: "w-48" },
+};
+
+function MerchantProductCard({ p, size, onEdit, onDelete }) {
+  const z = MP_SIZES[size] || MP_SIZES.medium;
+  return (
+    <div className={`bg-card border border-border rounded-lg ${z.card} flex gap-2 items-start`} data-testid={`prod-row-${p.id}`}>
+      <img src={p.image} alt="" className={`${z.img} rounded object-cover shrink-0`} />
+      <div className="min-w-0 flex-1">
+        <div className={`font-medium ${z.text} truncate`}>{p.name}</div>
+        <div className="font-mono text-xs">{money(p.price_simple, p.currency)} · Stock {p.stock}</div>
+        <div className="flex flex-wrap gap-1 mt-1 items-center">
+          <StatusBadge status={p.moderation_status || "APPROVED"} />
+          {p.promo?.enabled && <span className="text-[10px] bg-primary text-white px-1.5 rounded">PROMO</span>}
+          {(p.variants || []).length > 0 && <span className="text-[10px] rounded-full bg-muted px-1.5 py-0.5">{p.variants.length} type(s)</span>}
+        </div>
+        {p.moderation_status === "REJECTED" && p.moderation_reason ? <div className="text-[10px] text-destructive mt-0.5">{p.moderation_reason}</div> : null}
+      </div>
+      <div className="flex shrink-0">
+        <Button variant="ghost" size="icon" onClick={() => onEdit(p)} data-testid={`edit-${p.id}`}><Pencil className="w-4 h-4" /></Button>
+        <Button variant="ghost" size="icon" className="text-destructive" onClick={() => onDelete(p.id)} data-testid={`del-${p.id}`}><Trash2 className="w-4 h-4" /></Button>
+      </div>
+    </div>
+  );
+}
+
+function groupBy(items, keyFn, fallback) {
+  const m = new Map();
+  items.forEach((it) => { const k = keyFn(it) || fallback; if (!m.has(k)) m.set(k, []); m.get(k).push(it); });
+  return [...m.entries()];
+}
+
+function SubcategoryView({ items, layout, size, onEdit, onDelete }) {
+  const subs = groupBy(items, (p) => p.subcategory, "Sans sous-catégorie");
+  const card = (p) => <MerchantProductCard key={p.id} p={p} size={size} onEdit={onEdit} onDelete={onDelete} />;
+  const z = MP_SIZES[size] || MP_SIZES.medium;
+  if (layout === "tabs") {
+    return (
+      <Tabs defaultValue={subs[0]?.[0]}>
+        <TabsList className="flex-wrap h-auto">{subs.map(([n, l]) => <TabsTrigger key={n} value={n}>{n} ({l.length})</TabsTrigger>)}</TabsList>
+        {subs.map(([n, l]) => <TabsContent key={n} value={n}><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{l.map(card)}</div></TabsContent>)}
+      </Tabs>
+    );
+  }
+  if (layout === "columns") {
+    return (
+      <div className="flex gap-3 overflow-x-auto pb-2">
+        {subs.map(([n, l]) => (
+          <div key={n} className={`${z.col} shrink-0 space-y-2`}>
+            <div className="text-xs font-semibold text-muted-foreground uppercase">{n} ({l.length})</div>
+            {l.map(card)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {subs.map(([n, l]) => (
+        <div key={n}>
+          <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">{n} ({l.length})</div>
+          <div className="space-y-2">{l.map(card)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProductsByShop({ products, shops, layout, size, onEdit, onDelete }) {
+  const names = Object.fromEntries((shops || []).map((s) => [s.id, s.name]));
+  const groups = groupBy(products, (p) => p.shop_id, "");
+  return (
+    <div className="space-y-8" data-testid="products-by-shop">
+      {groups.map(([shopId, items]) => (
+        <section key={shopId || "none"}>
+          <h2 className="font-heading text-lg font-bold mb-3 flex items-center gap-2"><Store className="w-5 h-5" />{names[shopId] || "Boutique"} <span className="text-sm font-normal text-muted-foreground">({items.length})</span></h2>
+          <div className="space-y-5">
+            {groupBy(items, (p) => p.category, "Sans catégorie").map(([cat, list]) => (
+              <div key={cat} className="border border-border rounded-xl p-3">
+                <h3 className="font-semibold mb-2">{cat} <span className="text-xs font-normal text-muted-foreground">({list.length})</span></h3>
+                <SubcategoryView items={list} layout={layout} size={size} onEdit={onEdit} onDelete={onDelete} />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export function MerchantProducts() {
   const { shop } = useMerchant();
   const [products, setProducts] = useState(null);
+  const [allShops, setAllShops] = useState([]);
+  const [layout, setLayout] = useState(() => localStorage.getItem("am_mp_layout") || "list");
+  const [size, setSize] = useState(() => localStorage.getItem("am_mp_size") || "medium");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [csvEnabled, setCsvEnabled] = useState(false);
@@ -821,9 +919,11 @@ export function MerchantProducts() {
   const [supplierImportOpen, setSupplierImportOpen] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [importBusy, setImportBusy] = useState(false);
-  const load = () => api.get("/products/mine").then((r) => setProducts(r.data.products)).catch(() => setProducts([]));
-  useEffect(() => { load(); api.get("/features").then((r) => setCsvEnabled(r.data.csv_import_enabled)).catch(() => {}); }, []);
+  const load = () => api.get("/products/mine?all_shops=true").then((r) => setProducts(r.data.products)).catch(() => setProducts([]));
+  useEffect(() => { load(); api.get("/shops/mine").then((r) => setAllShops(r.data.shops || [])).catch(() => {}); api.get("/features").then((r) => setCsvEnabled(r.data.csv_import_enabled)).catch(() => {}); }, []);
   const del = async (id) => { if (!window.confirm("Supprimer cet article ?")) return; await api.delete(`/products/${id}`); toast.success("Supprimé"); load(); };
+  const pickLayout = (v) => { setLayout(v); localStorage.setItem("am_mp_layout", v); };
+  const pickSize = (v) => { setSize(v); localStorage.setItem("am_mp_size", v); };
   const openNew = () => { setEditing(null); setOpen(true); };
   const openEdit = (p) => { setEditing(p); setOpen(true); };
   const doImport = async (file) => {
@@ -850,6 +950,28 @@ export function MerchantProducts() {
             <Button className="rounded-full" onClick={openNew} data-testid="new-product-btn"><Plus className="w-4 h-4 mr-1" /> Nouvel article</Button>
           </div>
         } />
+      <div className="flex flex-wrap gap-2 mb-4">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="outline" className="rounded-full" data-testid="mp-layout">S-C : {{ list: "LISTES", tabs: "ONGLETS", columns: "COLONNES" }[layout]}</Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuRadioGroup value={layout} onValueChange={pickLayout}>
+              <DropdownMenuRadioItem value="list" data-testid="mp-layout-list">Listes</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="columns" data-testid="mp-layout-columns">Colonnes</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="tabs" data-testid="mp-layout-tabs">Onglets</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="outline" className="rounded-full" data-testid="mp-size">Affi : {{ large: "GRAND", medium: "MOYEN", small: "PETIT" }[size]}</Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuRadioGroup value={size} onValueChange={pickSize}>
+              <DropdownMenuRadioItem value="large" data-testid="mp-size-large">Grand</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="medium" data-testid="mp-size-medium">Moyen</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="small" data-testid="mp-size-small">Petit</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       <SupplierImportDialog open={supplierImportOpen} onOpenChange={setSupplierImportOpen} shop={shop} onPublished={load} />
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-lg">
@@ -888,34 +1010,7 @@ export function MerchantProducts() {
         </DialogContent>
       </Dialog>
       {products.length === 0 ? <EmptyState title="Aucun article" description="Créez votre premier article." action={<Button className="rounded-full" onClick={openNew}>Créer</Button>} /> : (
-        <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
-          <Table>
-            <TableHeader><TableRow><TableHead>Article</TableHead><TableHead>Types</TableHead><TableHead>Cat.</TableHead><TableHead className="text-right">PCS</TableHead><TableHead className="text-right">Stock</TableHead><TableHead>Dispo</TableHead><TableHead>Modération</TableHead><TableHead></TableHead></TableRow></TableHeader>
-            <TableBody>
-              {products.map((p) => (
-                <TableRow key={p.id} data-testid={`prod-row-${p.id}`}>
-                  <TableCell><div className="flex items-center gap-2"><img src={p.image} alt="" className="w-9 h-9 rounded object-cover" /><span className="font-medium text-sm">{p.name}</span>{p.promo?.enabled && <span className="text-[10px] bg-primary text-white px-1.5 rounded">PROMO</span>}</div></TableCell>
-                  <TableCell className="max-w-[180px]">
-                    {(p.variants || []).length ? <div className="flex flex-wrap gap-1">{p.variants.slice(0, 3).map((v) => <span key={v.id} className="text-[10px] rounded-full bg-muted px-1.5 py-0.5">{v.label || v.type || "Type"}</span>)}{p.variants.length > 3 && <span className="text-[10px] text-muted-foreground">+{p.variants.length - 3}</span>}</div> : <span className="text-xs text-muted-foreground">—</span>}
-                  </TableCell>
-                  <TableCell className="text-xs">{p.category ? `${p.category}${p.subcategory ? ` › ${p.subcategory}` : ""}` : <span className="text-amber-700 font-medium" data-testid={`uncategorized-${p.id}`}>Sans catégorie — à réattribuer</span>}</TableCell>
-                  <TableCell className="text-right font-mono">{money(p.price_simple, p.currency)}</TableCell>
-                  <TableCell className={`text-right font-mono ${p.stock === 0 ? "text-red-600" : p.stock <= p.alert_threshold ? "text-amber-600" : ""}`}>{p.stock}</TableCell>
-                  <TableCell><StatusBadge status={p.stock === 0 ? "REJETEE" : "APPROVED"} /></TableCell>
-                  <TableCell data-testid={`mod-status-${p.id}`}>
-                    <StatusBadge status={p.moderation_status || "APPROVED"} />
-                    {p.approved_version_online && <div className="text-[10px] text-muted-foreground mt-0.5">Version approuvée en ligne</div>}
-                    {p.moderation_status === "REJECTED" && p.moderation_reason ? <div className="text-[10px] text-destructive mt-0.5 max-w-[140px]">{p.moderation_reason}</div> : null}
-                  </TableCell>
-                  <TableCell><div className="flex gap-1">
-                    <Button variant="ghost" size="icon" onClick={() => openEdit(p)} data-testid={`edit-${p.id}`}><Pencil className="w-4 h-4" /></Button>
-                    <Button variant="ghost" size="icon" className="text-destructive" onClick={() => del(p.id)} data-testid={`del-${p.id}`}><Trash2 className="w-4 h-4" /></Button>
-                  </div></TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <ProductsByShop products={products} shops={allShops} layout={layout} size={size} onEdit={openEdit} onDelete={del} />
       )}
     </div>
   );
