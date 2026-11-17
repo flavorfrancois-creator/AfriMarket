@@ -1446,9 +1446,9 @@ async def delete_product(product_id: str, user: dict = Depends(require_roles("ME
 
 @api.post("/products/{product_id}/stock")
 async def adjust_stock(product_id: str, req: StockAdjustReq, user: dict = Depends(require_roles("MERCHANT"))):
-    shop = await _my_shop(user)
     product = await db.products.find_one({"id": product_id})
-    if not product or not shop or product["shop_id"] != shop["id"]:
+    shop = await db.shops.find_one({"id": product["shop_id"], "owner_id": user["id"]}) if product else None
+    if not product or not shop:
         raise HTTPException(status_code=403, detail="Accès refusé")
     new_stock = max(0, product.get("stock", 0) + req.delta)
     await db.products.update_one({"id": product_id}, {"$set": {"stock": new_stock}})

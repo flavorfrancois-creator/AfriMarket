@@ -1138,35 +1138,49 @@ export function MerchantCustomers() {
 
 /* ---------------- Stock ---------------- */
 export function MerchantStock() {
-  const { shop } = useMerchant();
   const [products, setProducts] = useState(null);
-  const load = () => api.get("/products/mine").then((r) => setProducts(r.data.products)).catch(() => setProducts([]));
-  useEffect(() => { load(); }, []);
+  const [shops, setShops] = useState([]);
+  const load = () => api.get("/products/mine?all_shops=true").then((r) => setProducts(r.data.products)).catch(() => setProducts([]));
+  useEffect(() => { load(); api.get("/shops/mine").then((r) => setShops(r.data.shops || [])).catch(() => {}); }, []);
   const adjust = async (id, delta) => { try { await api.post(`/products/${id}/stock`, { delta, reason: delta > 0 ? "Réappro" : "Sortie manuelle" }); load(); } catch (e) { toast.error(apiErr(e)); } };
   if (products === null) return <Loading />;
+  const tabs = shops.length ? shops : [{ id: "", name: "Boutique" }];
   return (
     <div>
-      <PageHeader title="Stocks" subtitle="Gestion des quantités" />
-      <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
-        <Table>
-          <TableHeader><TableRow><TableHead>Article</TableHead><TableHead className="text-center">Initial</TableHead><TableHead className="text-center">Vendus</TableHead><TableHead className="text-center">Stock actuel</TableHead><TableHead className="text-center">Ajuster</TableHead></TableRow></TableHeader>
-          <TableBody>
-            {products.map((p) => (
-              <TableRow key={p.id}>
-                <TableCell className="font-medium text-sm">{p.name}</TableCell>
-                <TableCell className="text-center font-mono">{p.initial_stock}</TableCell>
-                <TableCell className="text-center font-mono">{p.sold}</TableCell>
-                <TableCell className="text-center"><span className={`font-mono font-bold ${p.stock === 0 ? "text-red-600" : p.stock <= p.alert_threshold ? "text-amber-600" : "text-green-600"}`}>{p.stock}</span></TableCell>
-                <TableCell><div className="flex items-center justify-center gap-1">
-                  <Button size="icon" variant="outline" className="h-7 w-7 rounded-full" onClick={() => adjust(p.id, -1)} data-testid={`stock-minus-${p.id}`}><Minus className="w-3 h-3" /></Button>
-                  <Button size="icon" variant="outline" className="h-7 w-7 rounded-full" onClick={() => adjust(p.id, 1)} data-testid={`stock-plus-${p.id}`}><Plus className="w-3 h-3" /></Button>
-                  <Button size="sm" variant="ghost" className="text-xs" onClick={() => adjust(p.id, 10)}>+10</Button>
-                </div></TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+      <PageHeader title="Stocks" subtitle="Gestion des quantités par boutique" />
+      <Tabs defaultValue={tabs[0].id} key={tabs.map((t) => t.id).join()}>
+        <TabsList className="flex-wrap h-auto mb-4" data-testid="stock-shop-tabs">
+          {tabs.map((sh) => <TabsTrigger key={sh.id} value={sh.id} data-testid={`stock-tab-${sh.id}`}>{sh.name} ({products.filter((p) => p.shop_id === sh.id).length})</TabsTrigger>)}
+        </TabsList>
+        {tabs.map((sh) => {
+          const list = products.filter((p) => p.shop_id === sh.id);
+          return (
+            <TabsContent key={sh.id} value={sh.id}>
+              <div className="bg-card border border-border rounded-xl overflow-hidden overflow-x-auto">
+                <Table>
+                  <TableHeader><TableRow><TableHead>Article</TableHead><TableHead className="text-center">Initial</TableHead><TableHead className="text-center">Vendus</TableHead><TableHead className="text-center">Stock actuel</TableHead><TableHead className="text-center">Ajuster</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {list.length === 0 && <TableRow><TableCell colSpan={5} className="text-center text-sm text-muted-foreground">Aucun article dans cette boutique</TableCell></TableRow>}
+                    {list.map((p) => (
+                      <TableRow key={p.id}>
+                        <TableCell className="font-medium text-sm">{p.name}</TableCell>
+                        <TableCell className="text-center font-mono">{p.initial_stock}</TableCell>
+                        <TableCell className="text-center font-mono">{p.sold}</TableCell>
+                        <TableCell className="text-center"><span className={`font-mono font-bold ${p.stock === 0 ? "text-red-600" : p.stock <= p.alert_threshold ? "text-amber-600" : "text-green-600"}`}>{p.stock}</span></TableCell>
+                        <TableCell><div className="flex items-center justify-center gap-1">
+                          <Button size="icon" variant="outline" className="h-7 w-7 rounded-full" onClick={() => adjust(p.id, -1)} data-testid={`stock-minus-${p.id}`}><Minus className="w-3 h-3" /></Button>
+                          <Button size="icon" variant="outline" className="h-7 w-7 rounded-full" onClick={() => adjust(p.id, 1)} data-testid={`stock-plus-${p.id}`}><Plus className="w-3 h-3" /></Button>
+                          <Button size="sm" variant="ghost" className="text-xs" onClick={() => adjust(p.id, 10)}>+10</Button>
+                        </div></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </TabsContent>
+          );
+        })}
+      </Tabs>
     </div>
   );
 }
