@@ -2632,7 +2632,8 @@ async def add_supplier_import_item_image_links(import_id: str, item_id: str, req
         raise HTTPException(status_code=404, detail="Produit à valider introuvable.")
     if req.kind not in ("product", "description"):
         raise HTTPException(status_code=400, detail="Type d'image invalide.")
-    urls = list(dict.fromkeys(u.strip() for u in req.urls if isinstance(u, str) and u.strip()))
+    raw = " ".join(u for u in req.urls if isinstance(u, str))
+    urls = list(dict.fromkeys(re.findall(r"https?://[^\s\"'<>()\[\]]+", raw)))
     if not urls:
         raise HTTPException(status_code=400, detail="Ajoutez au moins un lien.")
     if len(urls) > 30:
@@ -2642,6 +2643,8 @@ async def add_supplier_import_item_image_links(import_id: str, item_id: str, req
     known = {c.get("source") for c in item.get("candidates") or [] if c.get("source")}
 
     async def expand(url):
+        if re.search(r"\.(?:jpe?g|png|webp|gif)(?:\?|$)", urlsplit(url).path + ("?" if urlsplit(url).query else ""), re.I):
+            return [url], None
         try:
             _root_for_host(urlsplit(url).hostname or "")
         except SupplierPageError:

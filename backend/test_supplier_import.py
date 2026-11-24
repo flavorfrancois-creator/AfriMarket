@@ -216,3 +216,14 @@ def test_kikuu_hosts_and_category_details():
     product = parse_supplier_page(html, "https://www.kikuu.com/goods/1")["product"]
     assert product["source_category"] == "Mode > Sacs"
     assert "Matiere : Cuir" in product["description"] and product["source_price"] == 12.5
+
+
+def test_kikuu_embedded_state_images():
+    from supplier_import import parse_supplier_page
+    state = ('window.g_initialProps = {"product":{"product":{"productDetailUrl":"https:\\u002F\\u002Fx.invalid\\u002Fd.html",'
+             '"product":{"productName":"Chaussure","productBigImg0":"https://global2019-static-cdn.kikuu.com/a.jpg",'
+             '"productBigImg1":"https://global2019-static-cdn.kikuu.com/b.jpg","lowestPrice":10,"priceUnitShow":"USD"}}}};')
+    page = parse_supplier_page(f"<html><script>{state}</script></html>".encode(), "https://www.kikuu.com/product/1")
+    product = page["product"]
+    assert product["image"].endswith("/a.jpg") and product["gallery"] == ["https://global2019-static-cdn.kikuu.com/b.jpg"]
+    assert product["source_price"] == 10 and product["_detail_url"] == "https://x.invalid/d.html"

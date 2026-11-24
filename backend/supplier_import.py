@@ -343,6 +343,114 @@ def _product_from_page(parser: _PageParser, page_url: str):
     return product
 
 
+_IMG_URL = re.compile(r'https?://[^\s"\'<>()\[\]\\]+?\.(?:jpe?g|png|webp|gif)(?:\?[^\s"\'<>()\[\]\\]*)?', re.I)
+
+
+def _strip_style(url: str) -> str:
+    """Kikuu CDN serves a resized copy when ?x-oss-process is present; drop it to get the original."""
+    return url.split("?x-oss-process", 1)[0].split("?", 1)[0] if "kikuu.com" in url else url
+
+
+def _kikuu_state(text: str):
+    """Locate the product object embedded in Kikuu's server-rendered window.g_initialProps."""
+    marker = text.find('"productBigImg0"')
+    if marker < 0:
+        marker = text.find('"productImg0"')
+    if marker < 0:
+        return None, ""
+    start = text.rfind('"product":{', 0, marker)
+    if start < 0:
+        return None, ""
+    decoder = json.JSONDecoder()
+    try:
+        product, _ = decoder.raw_decode(text, start + len('"product":'))
+    except ValueError:
+        return None, ""
+    head = text[max(0, start - 600):start]
+    detail = re.search(r'"productDetailUrl"\s*:\s*"([^"]+)"\s*,\s*$', head)
+    if detail:
+        try:
+            detail = json.loads('"%s"' % detail.group(1))
+        except ValueError:
+            detail = ""
+    return (product if isinstance(product, dict) else None), (detail or "")
+
+
+def _kikuu_product(text: str, page_url: str):
+    state, detail_url = _kikuu_state(text)
+    if not state or not (state.get("productName") or "").strip():
+        return None
+    images = []
+    for i in range(30):
+        value = state.get(f"productBigImg{i}") or state.get(f"productImg{i}")
+        if not value:
+            if i > 8:
+                break
+            continue
+        value = _strip_style(str(value))
+        if value.startswith("https://") and value not in images:
+            images.append(value)
+    price = state.get("lowestPrice") or state.get("realLowestPrice")
+    try:
+        price = round(float(price), 2) if price is not None and float(price) > 0 else None
+    except (TypeError, ValueError):
+        price = None
+    return {
+        "name": str(state["productName"]).strip()[:200],
+        "short_description": str(state.get("subTitle") or "")[:500],
+        "description": "",
+        "image": images[0] if images else "",
+        "gallery": images[1:],
+        "description_images": [],
+        "variants": [],
+        "sku": str(state.get("productNo") or state.get("id") or "")[:100],
+        "source_price": price,
+        "source_currency": str(state.get("priceUnitShow") or "")[:8].upper(),
+        "brand": "",
+        "source_category": "",
+        "_detail_url": detail_url,
+    }
+
+
+def _fetch_kikuu_detail(url: str):
+    """Fetch Kikuu's description HTML (hosted on its CDN) and return (text, image urls)."""
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or parsed.port not in (None, 443) or not _KIKUU_HOST.search(host):
+            return "", []
+        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+            return "", []
+        response = requests.get(url, headers={"User-Agent": "AfriMarketProductImporter/1.0"},
+                                timeout=(5, 12), allow_redirects=False, stream=True)
+        try:
+            if response.status_code != 200:
+                return "", []
+            data, total = [], 0
+            for chunk in response.iter_content(chunk_size=65536):
+                total += len(chunk)
+                if total > 2 * 1024 * 1024:
+                    break
+                data.append(chunk)
+        finally:
+            response.close()
+        body = b"".join(data).decode("utf-8", errors="replace")
+    except (OSError, ValueError, requests.RequestException):
+        return "", []
+    images = []
+    for match in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', body, re.I):
+        src = _strip_style(html.unescape(match.group(1)))
+        if src.startswith("https://") and src not in images:
+            images.append(src)
+    body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", body, flags=re.I | re.S)
+    body = re.sub(r"<img[^>]*>", " ", body, flags=re.I)
+    body = re.sub(r"<(br|/p|/div|/li)[^>]*>", "\n", body, flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", body))
+    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return text[:10000], images[:_MAX_DESCRIPTION_IMAGES]
+
+
 def parse_supplier_page(content: bytes, page_url: str):
     parser = _PageParser()
     try:
@@ -350,7 +458,12 @@ def parse_supplier_page(content: bytes, page_url: str):
     except Exception as exc:
         raise SupplierPageError("La page fournisseur ne peut pas être analysée.") from exc
 
-    product = _product_from_page(parser, page_url)
+    root_host = _root_for_host(urlsplit(page_url).hostname or "")
+    product = None
+    if root_host.startswith("kikuu."):
+        product = _kikuu_product(content.decode("utf-8", errors="replace"), page_url)
+    if not product:
+        product = _product_from_page(parser, page_url)
     links = []
     for href in parser.product_links:
         absolute = urljoin(page_url, href)
@@ -399,7 +512,16 @@ def fetch_supplier_page(url: str, expected_root: str = None):
                 if total > _MAX_PAGE_BYTES:
                     raise SupplierPageError("La page fournisseur dépasse la taille maximale autorisée.")
                 chunks.append(chunk)
-            return parse_supplier_page(b"".join(chunks), current_url)
+            page = parse_supplier_page(b"".join(chunks), current_url)
+            product = page.get("product")
+            if product and product.get("_detail_url"):
+                text, images = _fetch_kikuu_detail(product["_detail_url"])
+                product["description"] = text or product.get("description", "")
+                product["short_description"] = product.get("short_description") or text[:500]
+                product["description_images"] = images
+            if product:
+                product.pop("_detail_url", None)
+            return page
         finally:
             response.close()
     raise SupplierPageError("Trop de redirections sur la page fournisseur.")
