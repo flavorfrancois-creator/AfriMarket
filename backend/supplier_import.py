@@ -5,13 +5,16 @@ import json
 import math
 import re
 import socket
+import time
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
 
 import requests
 
 
-_VENDOR_ROOTS = ("aliexpress.com", "alibaba.com")
+_VENDOR_ROOTS = ("aliexpress.com", "aliexpress.us", "alibaba.com")
+_ALI_HOST = re.compile(r"(?:^|\.)(aliexpress\.[a-z]{2,3}(?:\.[a-z]{2})?)$")
+_THUMB_TAIL = re.compile(r"(\.(?:jpe?g|png|webp|gif))_[^/?#]*$", re.I)
 _KIKUU_HOST = re.compile(r"(?:^|\.)(kikuu\.[a-z]{2,3}(?:\.[a-z]{2})?)$")
 _PRODUCT_PATH = re.compile(r"/(?:item/\d+|product-detail/[^/?#]+|product/[^/?#]+|goods/[^/?#]+|products?-[^/?#]+)", re.I)
 _MAX_PAGE_BYTES = 4 * 1024 * 1024
@@ -35,7 +38,7 @@ def _root_for_host(host: str) -> str:
     for root in _VENDOR_ROOTS:
         if host == root or host.endswith("." + root):
             return root
-    match = _KIKUU_HOST.search(host)
+    match = _ALI_HOST.search(host) or _KIKUU_HOST.search(host)
     if match:
         return match.group(1)
     raise SupplierPageError("Seules les adresses AliExpress, Alibaba et Kikuu sont acceptées.")
@@ -64,7 +67,7 @@ def _clean_vendor_url(value: str, expected_root: str = None):
     root = _root_for_host(host or "")
     if parsed.scheme.lower() != "https" or parsed.username or parsed.password or (port not in (None, 443)):
         raise SupplierPageError("Utilisez une adresse HTTPS publique d'AliExpress, Alibaba ou Kikuu.")
-    if expected_root and root != expected_root:
+    if expected_root and root.split(".")[0] != expected_root.split(".")[0]:
         raise SupplierPageError("La page suivante ne provient pas du même site fournisseur.")
     clean = parsed._replace(fragment="")
     return urlunsplit(clean), root, host
@@ -181,7 +184,7 @@ def _images(value, base_url: str, limit: int = _MAX_GALLERY):
             item = item.get("url") or item.get("contentUrl")
         if not isinstance(item, str):
             continue
-        url = _THUMB_SUFFIX.sub(r"\1", urljoin(base_url, item.strip()))
+        url = normalize_image_url(_THUMB_SUFFIX.sub(r"\1", urljoin(base_url, item.strip())))
         parsed = urlsplit(url)
         if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password and len(url) <= 2048 and url not in result:
             result.append(url)
@@ -346,6 +349,15 @@ def _product_from_page(parser: _PageParser, page_url: str):
 _IMG_URL = re.compile(r'https?://[^\s"\'<>()\[\]\\]+?\.(?:jpe?g|png|webp|gif)(?:\?[^\s"\'<>()\[\]\\]*)?', re.I)
 
 
+def normalize_image_url(url: str) -> str:
+    """Turn AliExpress/Alibaba thumbnail variants (x.jpg_220x220q75.jpg_.avif) into the original file."""
+    host = (urlsplit(url).hostname or "").lower()
+    if any(k in host for k in ("alicdn.com", "aliexpress-media.com", "aliexpress.com", "alibaba.com")):
+        parts = urlsplit(url)
+        return urlunsplit(parts._replace(path=_THUMB_TAIL.sub(r"\1", parts.path), query=""))
+    return _strip_style(url)
+
+
 def _strip_style(url: str) -> str:
     """Kikuu CDN serves a resized copy when ?x-oss-process is present; drop it to get the original."""
     return url.split("?x-oss-process", 1)[0].split("?", 1)[0] if "kikuu.com" in url else url
@@ -484,47 +496,64 @@ def parse_supplier_page(content: bytes, page_url: str):
     return {"product": product, "product_links": links, "next_url": next_url}
 
 
-def fetch_supplier_page(url: str, expected_root: str = None):
+def _fetch_once(url: str, expected_root: str = None):
     current_url, root = validate_supplier_url(url, expected_root)
-    headers = {"User-Agent": "AfriMarketProductImporter/1.0 (+public catalog metadata)"}
-    for _ in range(_MAX_REDIRECTS + 1):
-        response = requests.get(current_url, headers=headers, timeout=(5, 12), allow_redirects=False, stream=True)
-        try:
-            if response.is_redirect or response.is_permanent_redirect:
-                location = response.headers.get("Location")
-                if not location:
-                    raise SupplierPageError("Le fournisseur a renvoyé une redirection invalide.")
-                current_url, root = validate_supplier_url(urljoin(current_url, location), root)
-                continue
-            if response.status_code in (401, 403, 429):
-                raise SupplierPageError("La page est bloquée, protégée ou soumise à une limite. Aucun contournement n’est tenté.")
-            if response.status_code >= 400:
-                raise SupplierPageError(f"Le fournisseur a répondu avec le code HTTP {response.status_code}.")
-            content_type = response.headers.get("Content-Type", "").lower()
-            if content_type and "html" not in content_type:
-                raise SupplierPageError("L’adresse ne renvoie pas une page HTML publique.")
-            chunks = []
-            total = 0
-            for chunk in response.iter_content(chunk_size=65536):
-                if not chunk:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    session = requests.Session()
+    try:
+        for _ in range(9):
+            response = session.get(current_url, headers=headers, timeout=(5, 12), allow_redirects=False, stream=True)
+            try:
+                if response.is_redirect or response.is_permanent_redirect:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise SupplierPageError("Le fournisseur a renvoyé une redirection invalide.")
+                    current_url, root = validate_supplier_url(urljoin(current_url, location), root)
                     continue
-                total += len(chunk)
-                if total > _MAX_PAGE_BYTES:
-                    raise SupplierPageError("La page fournisseur dépasse la taille maximale autorisée.")
-                chunks.append(chunk)
-            page = parse_supplier_page(b"".join(chunks), current_url)
-            product = page.get("product")
-            if product and product.get("_detail_url"):
-                text, images = _fetch_kikuu_detail(product["_detail_url"])
-                product["description"] = text or product.get("description", "")
-                product["short_description"] = product.get("short_description") or text[:500]
-                product["description_images"] = images
-            if product:
-                product.pop("_detail_url", None)
-            return page
-        finally:
-            response.close()
+                if response.status_code in (401, 403, 429):
+                    raise SupplierPageError("La page est bloquée, protégée ou soumise à une limite. Utilisez l'ajout manuel par liens d'images.")
+                if response.status_code >= 400:
+                    raise SupplierPageError(f"Le fournisseur a répondu avec le code HTTP {response.status_code}.")
+                content_type = response.headers.get("Content-Type", "").lower()
+                if content_type and "html" not in content_type:
+                    raise SupplierPageError("L’adresse ne renvoie pas une page HTML publique.")
+                chunks = []
+                total = 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > _MAX_PAGE_BYTES:
+                        raise SupplierPageError("La page fournisseur dépasse la taille maximale autorisée.")
+                    chunks.append(chunk)
+                page = parse_supplier_page(b"".join(chunks), current_url)
+                product = page.get("product")
+                if product and product.get("_detail_url"):
+                    text, images = _fetch_kikuu_detail(product["_detail_url"])
+                    product["description"] = text or product.get("description", "")
+                    product["short_description"] = product.get("short_description") or text[:500]
+                    product["description_images"] = images
+                if product:
+                    product.pop("_detail_url", None)
+                return page
+            finally:
+                response.close()
+    finally:
+        session.close()
     raise SupplierPageError("Trop de redirections sur la page fournisseur.")
+
+
+def fetch_supplier_page(url: str, expected_root: str = None):
+    """AliExpress sometimes serves a short anti-bot stub first; one retry usually returns the real page."""
+    page = _fetch_once(url, expected_root)
+    if not page["product"] and not page["product_links"] and "aliexpress" in url.lower():
+        time.sleep(1.5)
+        page = _fetch_once(url, expected_root)
+    return page
 
 
 _IMAGE_SIGNATURES = (

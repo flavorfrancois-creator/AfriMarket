@@ -227,3 +227,11 @@ def test_kikuu_embedded_state_images():
     product = page["product"]
     assert product["image"].endswith("/a.jpg") and product["gallery"] == ["https://global2019-static-cdn.kikuu.com/b.jpg"]
     assert product["source_price"] == 10 and product["_detail_url"] == "https://x.invalid/d.html"
+
+
+def test_aliexpress_thumbnail_links_are_normalized():
+    from supplier_import import normalize_image_url
+    u = "https://ae-pic-a1.aliexpress-media.com/kf/S0ce4623b8630421998db3cfa75a28035R.jpg_220x220q75.jpg_.avif"
+    assert normalize_image_url(u) == "https://ae-pic-a1.aliexpress-media.com/kf/S0ce4623b8630421998db3cfa75a28035R.jpg"
+    from supplier_import import _root_for_host
+    assert _root_for_host("www.aliexpress.us")

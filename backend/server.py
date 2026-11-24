@@ -41,7 +41,7 @@ import payapis
 import accounts
 import categories
 import sms_relay
-from supplier_import import _root_for_host, SupplierPageError, fetch_supplier_page, validate_supplier_url, download_image, _sniff_image
+from supplier_import import normalize_image_url, _root_for_host, SupplierPageError, fetch_supplier_page, validate_supplier_url, download_image, _sniff_image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -2633,7 +2633,10 @@ async def add_supplier_import_item_image_links(import_id: str, item_id: str, req
     if req.kind not in ("product", "description"):
         raise HTTPException(status_code=400, detail="Type d'image invalide.")
     raw = " ".join(u for u in req.urls if isinstance(u, str))
-    urls = list(dict.fromkeys(re.findall(r"https?://[^\s\"'<>()\[\]]+", raw)))
+    urls = list(dict.fromkeys(
+        normalize_image_url(u) if re.search(r"\.(?:jpe?g|png|webp|gif)(?:[_?/]|$)", urlsplit(u).path, re.I) else u
+        for u in re.findall(r"https?://[^\s\"'<>()\[\]]+", raw)
+    ))
     if not urls:
         raise HTTPException(status_code=400, detail="Ajoutez au moins un lien.")
     if len(urls) > 30:
