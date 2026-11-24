@@ -674,6 +674,29 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
     } catch (e) { toast.error(apiErr(e)); }
     finally { setUploading(false); }
   };
+  const [links, setLinks] = useState({ product: "", description: "" });
+  const addLinks = async (kind) => {
+    const urls = links[kind].split(/\s+/).filter(Boolean);
+    if (!urls.length) return;
+    setUploading(true);
+    try {
+      const { data } = await api.post(`/products/supplier-imports/${importId}/items/${item.id}/image-links`, { urls, kind });
+      setForm((cur) => ({ ...cur, candidates: data.item.candidates, image: cur.image || data.item.image,
+        gallery: kind === "product" ? [...new Set([...(cur.gallery || []), ...(data.item.gallery || [])])].filter((u) => u !== (cur.image || data.item.image)) : cur.gallery,
+        description_images: kind === "description" ? [...new Set([...(cur.description_images || []), ...(data.item.description_images || [])])] : cur.description_images }));
+      setLinks((cur) => ({ ...cur, [kind]: "" }));
+      toast.success(`${data.added} image(s) téléchargée(s)`);
+      if (data.errors?.length) toast.error(data.errors.slice(0, 2).join(" ; "));
+    } catch (e) { toast.error(apiErr(e)); }
+    finally { setUploading(false); }
+  };
+  const linkBox = (kind) => (
+    <div className="space-y-1" data-testid={`image-links-${kind}`}>
+      <Textarea rows={2} value={links[kind]} onChange={(e) => setLinks((cur) => ({ ...cur, [kind]: e.target.value }))}
+        placeholder="Collez un ou plusieurs liens (un par ligne) : images ou pages Kikuu, AliExpress, Alibaba" aria-label="Liens d'images" />
+      <Button type="button" size="sm" variant="outline" className="rounded-full" disabled={uploading} onClick={() => addLinks(kind)} data-testid={`image-links-btn-${kind}`}><Link2 className="w-3 h-3 mr-1" /> Télécharger depuis les liens</Button>
+    </div>
+  );
   if (item.status !== "PENDING") return null;
   return (
     <div className="border border-border rounded-xl p-4 space-y-3">
@@ -687,8 +710,10 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
       </div>
       <ImagePicker title="Images du produit" candidates={pool("product")} isSelected={(url) => url === form.image || (form.gallery || []).includes(url)}
         mainUrl={form.image} onToggle={toggleProduct} onMain={setMain} onFiles={(files) => addFiles(files, "product")} busy={uploading} testId="import-product-images" />
+      {linkBox("product")}
       <ImagePicker title="Images de description" candidates={pool("description")} isSelected={(url) => (form.description_images || []).includes(url)}
         onToggle={toggleDescription} onFiles={(files) => addFiles(files, "description")} busy={uploading} testId="import-description-images" />
+      {linkBox("description")}
       <p className="text-[11px] text-muted-foreground">Les images non sélectionnées seront supprimées définitivement à la validation.</p>
       <Input value={form.short_description || ""} onChange={(e) => upd("short_description", e.target.value)} placeholder="Description courte" aria-label="Description courte" />
       <Textarea value={form.description || ""} onChange={(e) => upd("description", e.target.value)} placeholder="Description détaillée" aria-label="Description détaillée" />

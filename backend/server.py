@@ -41,7 +41,7 @@ import payapis
 import accounts
 import categories
 import sms_relay
-from supplier_import import SupplierPageError, fetch_supplier_page, validate_supplier_url, download_image, _sniff_image
+from supplier_import import _root_for_host, SupplierPageError, fetch_supplier_page, validate_supplier_url, download_image, _sniff_image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -2613,6 +2613,88 @@ async def add_supplier_import_item_images(import_id: str, item_id: str, kind: st
     result = serialize(refreshed)
     result.pop("owner_id", None)
     return {"item": result}
+
+
+class ImageLinksReq(BaseModel):
+    urls: List[str]
+    kind: str = "product"
+
+
+@api.post("/products/supplier-imports/{import_id}/items/{item_id}/image-links")
+async def add_supplier_import_item_image_links(import_id: str, item_id: str, req: ImageLinksReq,
+                                               user: dict = Depends(require_roles("MERCHANT"))):
+    """Download images from direct links, or from Kikuu/AliExpress/Alibaba product pages, into our storage."""
+    session, _ = await _owned_supplier_import(import_id, user)
+    item = await db.supplier_import_items.find_one({
+        "id": item_id, "import_id": session["id"], "owner_id": user["id"], "status": "PENDING",
+    })
+    if not item:
+        raise HTTPException(status_code=404, detail="Produit à valider introuvable.")
+    if req.kind not in ("product", "description"):
+        raise HTTPException(status_code=400, detail="Type d'image invalide.")
+    urls = list(dict.fromkeys(u.strip() for u in req.urls if isinstance(u, str) and u.strip()))
+    if not urls:
+        raise HTTPException(status_code=400, detail="Ajoutez au moins un lien.")
+    if len(urls) > 30:
+        raise HTTPException(status_code=400, detail="Maximum 30 liens à la fois.")
+    field = "description_images" if req.kind == "description" else "gallery"
+    limit = 40 if req.kind == "description" else 20
+    known = {c.get("source") for c in item.get("candidates") or [] if c.get("source")}
+
+    async def expand(url):
+        try:
+            _root_for_host(urlsplit(url).hostname or "")
+        except SupplierPageError:
+            return [url], None
+        try:
+            clean, root = await asyncio.to_thread(validate_supplier_url, url)
+            page = await asyncio.to_thread(fetch_supplier_page, clean, root)
+        except (SupplierPageError, requests.RequestException) as exc:
+            return [], f"{url[:80]} : {exc}"
+        prod = page.get("product")
+        if not prod:
+            return [], f"{url[:80]} : aucune image produit détectée"
+        found = ([prod.get("image")] + list(prod.get("gallery") or []) if req.kind == "product"
+                 else list(prod.get("description_images") or []))
+        return [u for u in found if u], None
+
+    expanded = await asyncio.gather(*(expand(u) for u in urls))
+    errors = [e for _, e in expanded if e]
+    sources = [u for lst, _ in expanded for u in lst if u not in known]
+    sources = list(dict.fromkeys(sources))[: max(0, limit * 2)]
+    semaphore = asyncio.Semaphore(6)
+
+    async def fetch(url):
+        async with semaphore:
+            got = await asyncio.to_thread(download_image, url)
+            if not got:
+                return url, None
+            data, content_type, ext = got
+            return url, await _store_import_image(data, content_type, ext, user["id"], session["id"], item_id, url[-120:])
+
+    results = await asyncio.gather(*(fetch(u) for u in sources))
+    added = []
+    for url, info in results:
+        if info:
+            added.append({"id": new_id(), "url": info["url"], "path": info["path"], "kind": req.kind,
+                          "stored": True, "source": url})
+        else:
+            errors.append(f"{url[:80]} : image introuvable ou non valide")
+    if not added:
+        raise HTTPException(status_code=422, detail="Aucune image téléchargée. " + " ; ".join(errors[:3]))
+    update = {"$push": {"candidates": {"$each": added}}, "$set": {"updated_at": now_iso()}}
+    room = max(0, limit - len(item.get(field) or []))
+    urls_added = [c["url"] for c in added]
+    if req.kind == "product" and not item.get("image"):
+        update["$set"]["image"] = urls_added[0]
+        urls_added = urls_added[1:]
+    if urls_added[:room]:
+        update["$push"][field] = {"$each": urls_added[:room]}
+    await db.supplier_import_items.update_one({"id": item_id}, update)
+    refreshed = await db.supplier_import_items.find_one({"id": item_id})
+    result = serialize(refreshed)
+    result.pop("owner_id", None)
+    return {"item": result, "added": len(added), "errors": errors[:10]}
 
 
 # ---------------- Checkout / Orders ----------------
