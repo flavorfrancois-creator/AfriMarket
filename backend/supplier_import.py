@@ -1,4 +1,4 @@
-"""Extract public product metadata from accessible AliExpress and Alibaba pages."""
+"""Extract public product metadata from accessible AliExpress, Alibaba and Kikuu pages."""
 import html
 import ipaddress
 import json
@@ -12,7 +12,8 @@ import requests
 
 
 _VENDOR_ROOTS = ("aliexpress.com", "alibaba.com")
-_PRODUCT_PATH = re.compile(r"/(?:item/\d+|product-detail/[^/?#]+|product/[^/?#]+)", re.I)
+_KIKUU_HOST = re.compile(r"(?:^|\.)(kikuu\.[a-z]{2,3}(?:\.[a-z]{2})?)$")
+_PRODUCT_PATH = re.compile(r"/(?:item/\d+|product-detail/[^/?#]+|product/[^/?#]+|goods/[^/?#]+|products?-[^/?#]+)", re.I)
 _MAX_PAGE_BYTES = 4 * 1024 * 1024
 _MAX_REDIRECTS = 3
 _MAX_GALLERY = 20
@@ -34,7 +35,10 @@ def _root_for_host(host: str) -> str:
     for root in _VENDOR_ROOTS:
         if host == root or host.endswith("." + root):
             return root
-    raise SupplierPageError("Seules les adresses AliExpress et Alibaba sont acceptées.")
+    match = _KIKUU_HOST.search(host)
+    if match:
+        return match.group(1)
+    raise SupplierPageError("Seules les adresses AliExpress, Alibaba et Kikuu sont acceptées.")
 
 
 def validate_supplier_url(value: str, expected_root: str = None) -> tuple[str, str]:
@@ -59,7 +63,7 @@ def _clean_vendor_url(value: str, expected_root: str = None):
         raise SupplierPageError("Adresse web invalide.")
     root = _root_for_host(host or "")
     if parsed.scheme.lower() != "https" or parsed.username or parsed.password or (port not in (None, 443)):
-        raise SupplierPageError("Utilisez une adresse HTTPS publique d'AliExpress ou Alibaba.")
+        raise SupplierPageError("Utilisez une adresse HTTPS publique d'AliExpress, Alibaba ou Kikuu.")
     if expected_root and root != expected_root:
         raise SupplierPageError("La page suivante ne provient pas du même site fournisseur.")
     clean = parsed._replace(fragment="")
@@ -306,6 +310,20 @@ def _product_from_page(parser: _PageParser, page_url: str):
     except (TypeError, ValueError):
         price = None
 
+    category = node.get("category") or parser.meta.get("product:category") or parser.meta.get("article:section") or ""
+    if isinstance(category, (list, dict)):
+        category = " > ".join(_text(c.get("name") if isinstance(c, dict) else c) for c in (category if isinstance(category, list) else [category]))
+    details = []
+    props = node.get("additionalProperty") or []
+    for prop in props if isinstance(props, list) else [props]:
+        if isinstance(prop, dict) and prop.get("name") and prop.get("value") is not None:
+            details.append(f"{_text(prop['name'])[:80]} : {_text(prop['value'])[:200]}")
+    for key in ("color", "material", "model", "mpn", "size"):
+        if node.get(key):
+            details.append(f"{key.capitalize()} : {_text(node[key])[:200]}")
+    if details:
+        description = (description + "\n\nDétails :\n" + "\n".join(f"- {d}" for d in details[:40])).strip()
+
     product = None
     if title and (nodes or str(parser.meta.get("og:type", "")).lower().startswith("product")):
         product = {
@@ -320,6 +338,7 @@ def _product_from_page(parser: _PageParser, page_url: str):
             "source_price": price,
             "source_currency": str(currency)[:8].upper(),
             "brand": _text(node.get("brand"))[:100],
+            "source_category": _text(category)[:200],
         }
     return product
 

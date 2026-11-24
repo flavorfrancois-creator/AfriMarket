@@ -201,3 +201,18 @@ def test_download_image_accepts_real_images_only(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(None, None, None, None, ("10.0.0.1", 443))])
     assert supplier_import.download_image("https://cdn.example.com/a.png") is None
+
+
+def test_kikuu_hosts_and_category_details():
+    from supplier_import import _root_for_host, parse_supplier_page, SupplierPageError
+    assert _root_for_host("www.kikuu.cm") == "kikuu.cm"
+    try:
+        _root_for_host("evil-kikuu.com")
+        assert False
+    except SupplierPageError:
+        pass
+    html = b'''<script type="application/ld+json">{"@type":"Product","name":"Sac","category":"Mode > Sacs",
+    "additionalProperty":[{"name":"Matiere","value":"Cuir"}],"offers":{"price":"12.5","priceCurrency":"USD"}}</script>'''
+    product = parse_supplier_page(html, "https://www.kikuu.com/goods/1")["product"]
+    assert product["source_category"] == "Mode > Sacs"
+    assert "Matiere : Cuir" in product["description"] and product["source_price"] == 12.5

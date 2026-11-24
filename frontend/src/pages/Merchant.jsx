@@ -692,6 +692,7 @@ function SupplierImportDraft({ item, importId, shop, onChanged }) {
       <p className="text-[11px] text-muted-foreground">Les images non sélectionnées seront supprimées définitivement à la validation.</p>
       <Input value={form.short_description || ""} onChange={(e) => upd("short_description", e.target.value)} placeholder="Description courte" aria-label="Description courte" />
       <Textarea value={form.description || ""} onChange={(e) => upd("description", e.target.value)} placeholder="Description détaillée" aria-label="Description détaillée" />
+      {form.source_category && <p className="text-[11px] text-muted-foreground" data-testid="import-source-category">Catégorie source (indicative) : {form.source_category}</p>}
       <CategoryPicker category={form.category || ""} subcategory={form.subcategory || ""} onChange={(category, subcategory) => setForm((current) => ({ ...current, category, subcategory }))} />
       <VariantsEditor variants={form.variants || []} onChange={(v) => upd("variants", v)} currency={shop?.currency}
         imageOptions={[...new Set([form.image, ...(form.gallery || []), ...(form.variants || []).map((v) => v.image)].filter(Boolean))]} />
@@ -780,12 +781,12 @@ function SupplierImportDialog({ open, onOpenChange, shop, onPublished }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Importer depuis AliExpress ou Alibaba</DialogTitle>
+          <DialogTitle>Importer depuis AliExpress, Alibaba ou Kikuu</DialogTitle>
           <DialogDescription>Collez une URL publique de produit ou de boutique. Les boutiques sont traitées par lots de 20 maximum. Les pages protégées ne sont pas contournées. Chaque prix et frais de transport doit être défini par vous avant l’envoi en modération.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-2">
-            <Input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="https://www.aliexpress.com/... ou alibaba.com/..." aria-label="Adresse AliExpress ou Alibaba" />
+            <Input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="https://www.aliexpress.com/..., alibaba.com/... ou kikuu.com/..." aria-label="Adresse AliExpress, Alibaba ou Kikuu" />
             <Button className="rounded-full shrink-0" disabled={busy || !sourceUrl.trim()} onClick={start}><Link2 className="w-4 h-4 mr-1" /> Importer</Button>
           </div>
           {sessions.length > 0 && (
@@ -945,7 +946,7 @@ export function MerchantProducts() {
       <PageHeader title="Articles" subtitle={`${products.length} article(s)`}
         action={
           <div className="flex gap-2">
-            <Button variant="outline" className="rounded-full" onClick={() => setSupplierImportOpen(true)} data-testid="supplier-import-btn"><Link2 className="w-4 h-4 mr-1" /> AliExpress / Alibaba</Button>
+            <Button variant="outline" className="rounded-full" onClick={() => setSupplierImportOpen(true)} data-testid="supplier-import-btn"><Link2 className="w-4 h-4 mr-1" /> AliExpress / Alibaba / Kikuu</Button>
             {csvEnabled && <Button variant="outline" className="rounded-full" onClick={() => { setImportResult(null); setImportOpen(true); }} data-testid="import-csv-btn"><UploadCloud className="w-4 h-4 mr-1" /> Importer CSV</Button>}
             <Button className="rounded-full" onClick={openNew} data-testid="new-product-btn"><Plus className="w-4 h-4 mr-1" /> Nouvel article</Button>
           </div>
