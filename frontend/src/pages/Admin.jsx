@@ -149,6 +149,53 @@ const PRESETS = [
   { key: "year", label: "Année" },
 ];
 
+function ExpensesPanel({ d, canWrite, countries, reload }) {
+  const empty = { label: "", category: "Autre", amount: "", currency: "", kind: "REGULAR", frequency: "MONTHLY", scope: "GENERAL", country: "", start_date: fmtLocal(new Date()), end_date: "" };
+  const [f, setF] = useState(empty);
+  const [list, setList] = useState([]);
+  const load = () => api.get("/admin/expenses").then((r) => setList(r.data)).catch(() => {});
+  useEffect(() => { load(); }, []);
+  const set = (k) => (e) => setF((v) => ({ ...v, [k]: e?.target ? e.target.value : e }));
+  const add = async () => {
+    try {
+      await api.post("/admin/expenses", { ...f, amount: parseFloat(f.amount), end_date: f.end_date || null, country: f.scope === "COUNTRY" ? f.country : null });
+      toast.success("Charge ajoutée"); setF(empty); load(); reload();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const del = async (id) => { try { await api.delete(`/admin/expenses/${id}`); load(); reload(); } catch (e) { toast.error(apiErr(e)); } };
+  const inp = "h-9 rounded-md border border-input bg-background px-2 text-sm";
+  return (
+    <div className="bg-card border border-border rounded-xl p-5" data-testid="expenses-panel">
+      <h3 className="font-display font-bold mb-3">Charges et dépenses</h3>
+      {canWrite && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-4">
+          <input className={inp} placeholder="Libellé" value={f.label} onChange={set("label")} />
+          <input className={inp} placeholder="Catégorie (loyer, salaires…)" value={f.category} onChange={set("category")} />
+          <input className={inp} type="number" placeholder="Montant" value={f.amount} onChange={set("amount")} />
+          <input className={inp} placeholder="Devise (XAF…)" value={f.currency} onChange={set("currency")} />
+          <select className={inp} value={f.kind} onChange={set("kind")}><option value="REGULAR">Régulière</option><option value="TEMPORARY">Temporaire (ponctuelle)</option></select>
+          {f.kind === "REGULAR" && <select className={inp} value={f.frequency} onChange={set("frequency")}><option value="MONTHLY">Par mois</option><option value="YEARLY">Par an</option></select>}
+          <select className={inp} value={f.scope} onChange={set("scope")}><option value="GENERAL">Générale</option><option value="COUNTRY">Par pays</option></select>
+          {f.scope === "COUNTRY" && <select className={inp} value={f.country} onChange={set("country")}><option value="">Pays…</option>{countries.map((c) => <option key={c} value={c}>{c}</option>)}</select>}
+          <input className={inp} type="date" value={f.start_date} onChange={set("start_date")} title="Début / date" />
+          {f.kind === "REGULAR" && <input className={inp} type="date" value={f.end_date} onChange={set("end_date")} title="Fin (optionnel)" />}
+          <Button size="sm" onClick={add} data-testid="expense-add">Ajouter</Button>
+        </div>
+      )}
+      <div className="overflow-x-auto"><table className="w-full text-sm">
+        <thead><tr className="text-left text-muted-foreground"><th className="py-2">Libellé</th><th>Catégorie</th><th>Type</th><th>Portée</th><th>Montant</th><th>Période</th><th /></tr></thead>
+        <tbody>{list.map((e) => (
+          <tr key={e.id} className="border-t border-border"><td className="py-2">{e.label}</td><td>{e.category}</td>
+            <td>{e.kind === "REGULAR" ? (e.frequency === "YEARLY" ? "Annuelle" : "Mensuelle") : "Ponctuelle"}</td>
+            <td>{e.scope === "COUNTRY" ? e.country : "Générale"}</td><td>{money(e.amount, e.currency)}</td>
+            <td>{e.start_date}{e.end_date ? ` → ${e.end_date}` : ""}</td>
+            <td>{canWrite && <button className="text-red-600" onClick={() => del(e.id)}><Trash2 className="w-4 h-4" /></button>}</td></tr>
+        ))}{list.length === 0 && <tr><td colSpan={7} className="py-3 text-muted-foreground">Aucune charge enregistrée</td></tr>}</tbody>
+      </table></div>
+    </div>
+  );
+}
+
 export function AdminStatistics() {
   const { user } = useAuth();
   const [range, setRange] = useState(presetRange("month"));
@@ -159,12 +206,12 @@ export function AdminStatistics() {
   const df = range?.from ? fmtLocal(range.from) : null;
   const dt = range?.to ? fmtLocal(range.to) : null;
 
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!df || !dt) return;
-    setD(null);
     api.get("/admin/statistics", { params: { date_from: df, date_to: dt, ...(country !== "ALL" ? { country } : {}) } })
       .then((r) => setD(r.data)).catch((e) => { toast.error(apiErr(e)); setD({}); });
-  }, [df, dt, country]);
+  }, [df, dt, country, tick]);
 
   const [allCountries, setAllCountries] = useState([]);
   useEffect(() => { api.get("/config/countries").then((r) => setAllCountries(r.data.countries || [])).catch(() => {}); }, []);
@@ -215,6 +262,32 @@ export function AdminStatistics() {
             <StatCard label="Produits refusés" value={d.products.rejected} icon={XCircle} accent="bg-red-100 text-red-700" />
             <StatCard label="Note moyenne" value={d.reviews.average ?? "—"} sub={`${d.reviews.count} avis`} icon={ShieldCheck} accent="bg-green-100 text-green-700" />
           </div>
+
+          <div className="bg-card border border-border rounded-xl p-5" data-testid="stats-profit">
+            <h3 className="font-display font-bold mb-3">Bénéfice net (commissions − charges)</h3>
+            <div className="overflow-x-auto"><table className="w-full text-sm">
+              <thead><tr className="text-left text-muted-foreground"><th className="py-2">Devise</th><th>Commissions</th><th>Charges</th><th>Bénéfice net</th><th>À reverser aux marchands</th><th>Retraits payés</th></tr></thead>
+              <tbody>{d.profit.map((p) => (
+                <tr key={p.currency} className="border-t border-border"><td className="py-2 font-medium">{p.currency || "—"}</td><td>{money(p.commission, p.currency)}</td>
+                  <td>{money(p.expenses, p.currency)}</td><td className={p.net_profit < 0 ? "text-red-600 font-semibold" : "text-green-700 font-semibold"}>{money(p.net_profit, p.currency)}</td>
+                  <td>{money(p.merchant_payable, p.currency)}</td><td>{money(p.withdrawals_paid, p.currency)}</td></tr>
+              ))}{d.profit.length === 0 && <tr><td colSpan={6} className="py-3 text-muted-foreground">Aucune donnée sur la période</td></tr>}</tbody>
+            </table></div>
+            {d.expenses_by_category.length > 0 && <div className="flex flex-wrap gap-2 mt-3">{d.expenses_by_category.map((c, i) => (
+              <span key={i} className="text-xs px-2 py-1 rounded-full bg-muted">{c.category} : {money(c.amount, c.currency)}</span>))}</div>}
+          </div>
+
+          <div className="bg-card border border-border rounded-xl p-5" data-testid="stats-payouts">
+            <h3 className="font-display font-bold mb-3">Gains reversés par type de client (partenaires, professionnels, entreprises, bonus)</h3>
+            <div className="overflow-x-auto"><table className="w-full text-sm">
+              <thead><tr className="text-left text-muted-foreground"><th className="py-2">Type</th><th>Devise</th><th>En attente</th><th>Validé / disponible</th><th>Retiré</th></tr></thead>
+              <tbody>{d.payouts.map((p, i) => (
+                <tr key={i} className="border-t border-border"><td className="py-2 font-medium">{p.label}</td><td>{p.currency}</td><td>{money(p.pending, p.currency)}</td><td>{money(p.available, p.currency)}</td><td>{money(p.withdrawn, p.currency)}</td></tr>
+              ))}{d.payouts.length === 0 && <tr><td colSpan={5} className="py-3 text-muted-foreground">Aucun gain sur la période</td></tr>}</tbody>
+            </table></div>
+          </div>
+
+          <ExpensesPanel d={d} canWrite={user?.role === "SUPER_ADMIN" || (user?.permissions || []).includes("finance")} countries={options} reload={() => setTick((n) => n + 1)} />
 
           <div className="bg-card border border-border rounded-xl p-5">
             <h3 className="font-display font-bold mb-3">Finance par devise (comptabilité)</h3>

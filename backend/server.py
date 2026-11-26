@@ -8,6 +8,7 @@ import secrets
 import random
 import logging
 import re
+import calendar
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from urllib.parse import urlsplit
@@ -3483,6 +3484,84 @@ async def admin_reporting(date_from: Optional[str] = None, date_to: Optional[str
     return rep
 
 
+class ExpenseReq(BaseModel):
+    label: str
+    category: str = "Autre"
+    amount: float
+    currency: str
+    kind: str = "REGULAR"        # REGULAR (recurring) | TEMPORARY (one-off)
+    frequency: str = "MONTHLY"   # MONTHLY | YEARLY (regular only)
+    scope: str = "GENERAL"       # GENERAL | COUNTRY
+    country: Optional[str] = None
+    start_date: str
+    end_date: Optional[str] = None
+
+
+def _expense_for_period(e: dict, d_from: str, d_to: str) -> float:
+    """Expense amount attributable to [d_from, d_to] (YYYY-MM-DD), prorated per day for regular charges."""
+    amt = float(e.get("amount", 0) or 0)
+    start, end = e.get("start_date", "")[:10], (e.get("end_date") or "")[:10]
+    if e.get("kind") == "TEMPORARY":
+        return amt if d_from <= start <= d_to else 0.0
+    lo, hi = max(d_from, start), min(d_to, end or d_to)
+    if lo > hi:
+        return 0.0
+    cur, last, total = datetime.fromisoformat(lo).date(), datetime.fromisoformat(hi).date(), 0.0
+    while cur <= last:
+        dim = calendar.monthrange(cur.year, cur.month)[1]
+        total += amt / dim if e.get("frequency", "MONTHLY") == "MONTHLY" else amt / (366 if calendar.isleap(cur.year) else 365)
+        cur += timedelta(days=1)
+    return total
+
+
+def _check_expense_scope(user: dict, scope: str, country: Optional[str]):
+    allowed = _staff_countries(user)
+    if scope == "GENERAL":
+        if allowed is not None:
+            raise HTTPException(status_code=403, detail="Seul un responsable général peut gérer les charges générales")
+    elif not country or (allowed is not None and country not in allowed):
+        raise HTTPException(status_code=403, detail="Pays hors de votre périmètre")
+
+
+@api.get("/admin/expenses")
+async def list_expenses(user: dict = Depends(require_module("reporting"))):
+    allowed = _staff_countries(user)
+    q = {"scope": "COUNTRY", "country": {"$in": allowed}} if allowed is not None else {}
+    return [serialize(e) async for e in db.expenses.find(q).sort("start_date", -1)]
+
+
+@api.post("/admin/expenses")
+async def create_expense(req: ExpenseReq, user: dict = Depends(require_module("finance"))):
+    if req.kind not in ("REGULAR", "TEMPORARY") or req.scope not in ("GENERAL", "COUNTRY") or req.frequency not in ("MONTHLY", "YEARLY"):
+        raise HTTPException(status_code=400, detail="Paramètres invalides")
+    if req.amount <= 0 or not req.label.strip() or not req.currency.strip():
+        raise HTTPException(status_code=400, detail="Libellé, montant et devise requis")
+    try:
+        datetime.fromisoformat(req.start_date[:10])
+        if req.end_date:
+            datetime.fromisoformat(req.end_date[:10])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date invalide")
+    _check_expense_scope(user, req.scope, req.country)
+    doc = {**req.model_dump(), "id": new_id(), "label": req.label.strip(), "amount": round(req.amount, 2),
+           "country": req.country if req.scope == "COUNTRY" else None, "created_by": user["id"], "created_at": now_iso()}
+    await db.expenses.insert_one(doc)
+    await audit_log(user, "EXPENSE_CREATE", "expense", doc["id"], None, doc["amount"])
+    return serialize(doc)
+
+
+@api.delete("/admin/expenses/{expense_id}")
+async def delete_expense(expense_id: str, user: dict = Depends(require_module("finance"))):
+    e = await db.expenses.find_one({"id": expense_id})
+    if not e:
+        raise HTTPException(status_code=404, detail="Charge introuvable")
+    _check_expense_scope(user, e.get("scope", "GENERAL"), e.get("country"))
+    await db.expenses.delete_one({"id": expense_id})
+    await audit_log(user, "EXPENSE_DELETE", "expense", expense_id, e.get("amount"), None)
+    return {"ok": True}
+
+
+
 @api.get("/admin/statistics")
 async def admin_statistics(country: Optional[str] = None, date_from: Optional[str] = None,
                            date_to: Optional[str] = None, user: dict = Depends(require_module("reporting"))):
@@ -3573,7 +3652,51 @@ async def admin_statistics(country: Optional[str] = None, date_from: Optional[st
     rev_q = {"product_id": {"$in": [pr["id"] for pr in prods]}} if scope is not None and prods else ({"product_id": {"$in": []}} if scope is not None else {})
     avg = await db.product_reviews.find(rev_q, {"rating": 1}).to_list(50000)
 
+
+    exp_q = {"scope": "COUNTRY", "country": {"$in": scope}} if scope is not None else {}
+    expenses = await db.expenses.find(exp_q).to_list(5000)
+    exp_by_cur, exp_by_cat = {}, {}
+    for e in expenses:
+        v = _expense_for_period(e, date_from, date_to)
+        if v <= 0:
+            continue
+        exp_by_cur[e["currency"]] = exp_by_cur.get(e["currency"], 0) + v
+        k = f"{e.get('category') or 'Autre'}|{e['currency']}"
+        exp_by_cat[k] = exp_by_cat.get(k, 0) + v
+
+    owner_ids_all = [u["id"] if "id" in u else str(u["_id"]) for u in users]
+    tq = {"wallet": {"$in": EARNING_WALLETS}}
+    if scope is not None:
+        tq["user_id"] = {"$in": owner_ids_all}
+    earn = {}
+    async for t in db.wallet_transactions.find(tq):
+        if t.get("status") not in ("AVAILABLE", "PENDING", "WITHDRAWN") or not in_range(t.get("created_at")):
+            continue
+        key = (t["wallet"], t.get("currency", ""))
+        e2 = earn.setdefault(key, {"wallet": t["wallet"], "label": EARNING_LABELS.get(t["wallet"], t["wallet"]),
+                                   "currency": t.get("currency", ""), "pending": 0.0, "available": 0.0, "withdrawn": 0.0})
+        e2["pending" if t["status"] == "PENDING" else "withdrawn" if t["status"] == "WITHDRAWN" else "available"] += float(t.get("amount", 0) or 0)
+    wd_paid = {}
+    wq2 = {"status": "APPROUVE"}
+    if scope is not None:
+        wq2["user_id"] = {"$in": owner_ids_all}
+    async for w in db.withdrawal_requests.find(wq2):
+        if in_range(w.get("created_at")):
+            wd_paid[w.get("currency", "")] = wd_paid.get(w.get("currency", ""), 0) + float(w.get("amount", 0) or 0)
+    merchant_net = {c["currency"]: c["net"] for c in by_cur.values()}
+    profit = []
+    for cur in sorted(set(by_cur) | set(exp_by_cur)):
+        comm = by_cur.get(cur, {}).get("commission", 0.0)
+        ex = round(exp_by_cur.get(cur, 0.0), 2)
+        profit.append({"currency": cur, "commission": comm, "expenses": ex, "net_profit": round(comm - ex, 2),
+                       "merchant_payable": merchant_net.get(cur, 0.0), "withdrawals_paid": round(wd_paid.get(cur, 0.0), 2)})
+    result_extra = {
+        "profit": profit,
+        "expenses_by_category": [{"category": k.split("|")[0], "currency": k.split("|")[1], "amount": round(v, 2)} for k, v in sorted(exp_by_cat.items())],
+        "payouts": [{**v, "pending": round(v["pending"], 2), "available": round(v["available"], 2), "withdrawn": round(v["withdrawn"], 2)} for v in earn.values()],
+    }
     return {
+        **result_extra,
         "scope": scope, "allowed_countries": allowed, "date_from": date_from, "date_to": date_to,
         "customers": {"total": len(clients), "new": sum(1 for u in clients if in_range(u.get("created_at"))),
                       "active_buyers": len(active_buyers)},
