@@ -426,6 +426,11 @@ def _client_ip(request: Request) -> str:
     return request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0]
 
 
+def _addr_field(user: dict) -> str:
+    """Addresses are kept per active profile so a client/merchant dual account can have distinct ones."""
+    return "addresses" if user.get("role") == "CLIENT" else f"addresses_{user.get('role')}"
+
+
 def _user_public(user: dict) -> dict:
     profiles = user.get("profiles") or [user.get("role")]
     return {
@@ -447,8 +452,8 @@ def _user_public(user: dict) -> dict:
         "status": user.get("status", "ACTIVE"),
         "shop_ids": user.get("shop_ids", []),
         "countries": user.get("countries", []),
-        "addresses": user.get("addresses", []),
-        "address_required": user.get("role") != "SUPER_ADMIN" and not any(a.get("is_default") for a in user.get("addresses", [])),
+        "addresses": user.get(_addr_field(user), []),
+        "address_required": user.get("role") != "SUPER_ADMIN" and not any(a.get("is_default") for a in user.get(_addr_field(user), [])),
         "delegation": user.get("delegation") or {},
         "two_factor_enabled": bool(
             user.get("two_factor_enabled", False)
@@ -684,18 +689,18 @@ def _addr_clean(req: AddressReq) -> dict:
 async def _save_addresses(user: dict, addrs: list):
     if addrs and not any(a.get("is_default") for a in addrs):
         addrs[0]["is_default"] = True
-    await db.users.update_one({"_id": oid(user["id"])}, {"$set": {"addresses": addrs}})
+    await db.users.update_one({"_id": oid(user["id"])}, {"$set": {_addr_field(user): addrs}})
     return addrs
 
 
 @api.get("/me/addresses")
 async def list_my_addresses(user: dict = Depends(get_current_user)):
-    return {"addresses": user.get("addresses", [])}
+    return {"addresses": user.get(_addr_field(user), [])}
 
 
 @api.post("/me/addresses")
 async def add_my_address(req: AddressReq, user: dict = Depends(get_current_user)):
-    addrs = list(user.get("addresses", []))
+    addrs = list(user.get(_addr_field(user), []))
     a = {"id": new_id(), **_addr_clean(req), "is_default": req.is_default or not addrs}
     if a["is_default"]:
         for x in addrs:
@@ -706,7 +711,7 @@ async def add_my_address(req: AddressReq, user: dict = Depends(get_current_user)
 
 @api.put("/me/addresses/{addr_id}")
 async def update_my_address(addr_id: str, req: AddressReq, user: dict = Depends(get_current_user)):
-    addrs = list(user.get("addresses", []))
+    addrs = list(user.get(_addr_field(user), []))
     target = next((x for x in addrs if x["id"] == addr_id), None)
     if not target:
         raise HTTPException(status_code=404, detail="Adresse introuvable")
@@ -721,8 +726,8 @@ async def update_my_address(addr_id: str, req: AddressReq, user: dict = Depends(
 
 @api.delete("/me/addresses/{addr_id}")
 async def delete_my_address(addr_id: str, user: dict = Depends(get_current_user)):
-    addrs = [x for x in user.get("addresses", []) if x["id"] != addr_id]
-    if len(addrs) == len(user.get("addresses", [])):
+    addrs = [x for x in user.get(_addr_field(user), []) if x["id"] != addr_id]
+    if len(addrs) == len(user.get(_addr_field(user), [])):
         raise HTTPException(status_code=404, detail="Adresse introuvable")
     return {"addresses": await _save_addresses(user, addrs)}
 
@@ -2870,7 +2875,7 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
     _deny_partner(user)
     if not req.items:
         raise HTTPException(status_code=400, detail="Panier vide")
-    default_addr = next((a for a in user.get("addresses", []) if a.get("is_default")), None)
+    default_addr = next((a for a in user.get(_addr_field(user), []) if a.get("is_default")), None)
     if not default_addr:
         raise HTTPException(status_code=400, detail="Ajoutez une adresse de livraison par défaut dans Mon compte avant de commander")
     if not (req.address or "").strip():
