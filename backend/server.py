@@ -5401,6 +5401,7 @@ async def run_promo_emails() -> dict:
     settings = await get_settings()
     stats = {"sent": 0, "skipped": 0}
     if not settings.get("promo_email_enabled", True):
+        stats["last_error"] = "Envoi désactivé dans les paramètres"
         return stats
     now = datetime.now(timezone.utc)
     lease = await db.cron_runs.find_one_and_update(
@@ -5410,10 +5411,12 @@ async def run_promo_emails() -> dict:
         try:
             await db.cron_runs.insert_one({"_id": "promo-emails", "lease_until": (now + timedelta(minutes=30)).isoformat()})
         except Exception:
+            stats["last_error"] = "Un envoi est déjà en cours"
             return stats
     try:
         base = os.environ.get("FRONTEND_URL", "").rstrip("/")
         if not base.startswith("https://"):
+            stats["last_error"] = "FRONTEND_URL doit commencer par https://"
             return stats
         freq = int(settings.get("promo_email_frequency_days") or 7)
         limit = int(settings.get("promo_email_max_products") or 4)
@@ -5427,21 +5430,31 @@ async def run_promo_emails() -> dict:
             "email": {"$exists": True, "$ne": ""},
             "$or": [{"promo_last_sent_at": {"$exists": False}}, {"promo_last_sent_at": {"$lte": cutoff}}],
         }).to_list(300)
+        stats["eligible"] = len(users)
         for user in users:
             if user.get("country") in disabled:
                 stats["skipped"] += 1
                 continue
-            products = await _promo_products_for(user, limit, disabled)
-            if not products:
-                stats["skipped"] += 1
+            try:
+                products = await _promo_products_for(user, limit, disabled)
+                if not products:
+                    stats["skipped"] += 1
+                    continue
+                ok = await send_email(to=user["email"], subject="Nos sélections pour vous sur AfriMarket",
+                                      html=_promo_email_html(user, products, base), country=user.get("country"))
+            except Exception as exc:
+                logger.exception("Promo email failed for %s", user.get("id"))
+                stats["errors"] = stats.get("errors", 0) + 1
+                stats["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
                 continue
-            ok = await send_email(to=user["email"], subject="Nos sélections pour vous sur AfriMarket",
-                                  html=_promo_email_html(user, products, base), country=user.get("country"))
             if ok:
                 await db.users.update_one({"id": user["id"]}, {"$set": {"promo_last_sent_at": now_iso()}})
                 stats["sent"] += 1
             else:
                 stats["skipped"] += 1
+    except Exception as exc:
+        logger.exception("Promo email run failed")
+        stats["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
     finally:
         await db.cron_runs.update_one({"_id": "promo-emails"}, {"$unset": {"lease_until": ""}, "$set": {"stats": stats, "at": now_iso()}})
     return stats
