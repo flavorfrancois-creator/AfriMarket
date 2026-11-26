@@ -5330,6 +5330,13 @@ UNSUBSCRIBE_REASONS = {
 }
 
 
+async def _user_by_sid(sid: str):
+    try:
+        return await db.users.find_one({"_id": ObjectId(sid)})
+    except Exception:
+        return None
+
+
 def _unsub_token(user_id: str) -> str:
     import hmac
     key = os.environ["JWT_SECRET"].encode()
@@ -5432,6 +5439,7 @@ async def run_promo_emails() -> dict:
         }).to_list(300)
         stats["eligible"] = len(users)
         for user in users:
+            user["id"] = str(user["_id"])
             if user.get("country") in disabled:
                 stats["skipped"] += 1
                 continue
@@ -5448,7 +5456,7 @@ async def run_promo_emails() -> dict:
                 stats["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
                 continue
             if ok:
-                await db.users.update_one({"id": user["id"]}, {"$set": {"promo_last_sent_at": now_iso()}})
+                await db.users.update_one({"_id": ObjectId(user["id"])}, {"$set": {"promo_last_sent_at": now_iso()}})
                 stats["sent"] += 1
             else:
                 stats["skipped"] += 1
@@ -5481,7 +5489,7 @@ class UnsubscribeReq(BaseModel):
 async def unsubscribe_info(u: str, t: str):
     if not _unsub_user_ok(u, t):
         raise HTTPException(status_code=400, detail="Lien de désabonnement invalide.")
-    user = await db.users.find_one({"id": u})
+    user = await _user_by_sid(u)
     if not user:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
     email = user.get("email", "")
@@ -5494,11 +5502,11 @@ async def unsubscribe_info(u: str, t: str):
 async def unsubscribe(req: UnsubscribeReq):
     if not _unsub_user_ok(req.u, req.t):
         raise HTTPException(status_code=400, detail="Lien de désabonnement invalide.")
-    user = await db.users.find_one({"id": req.u})
+    user = await _user_by_sid(req.u)
     if not user:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
     reasons = [r for r in req.reasons if r in UNSUBSCRIBE_REASONS]
-    await db.users.update_one({"id": req.u}, {"$set": {"promo_unsubscribed": True, "promo_unsubscribed_at": now_iso()}})
+    await db.users.update_one({"_id": ObjectId(req.u)}, {"$set": {"promo_unsubscribed": True, "promo_unsubscribed_at": now_iso()}})
     await db.promo_unsubscribes.insert_one({
         "id": new_id(), "user_id": req.u, "role": user.get("role"), "country": user.get("country"),
         "reasons": reasons, "reason_text": (req.reason_text or "")[:500], "created_at": now_iso()})
@@ -5509,7 +5517,7 @@ async def unsubscribe(req: UnsubscribeReq):
 async def resubscribe(req: UnsubscribeReq):
     if not _unsub_user_ok(req.u, req.t):
         raise HTTPException(status_code=400, detail="Lien de désabonnement invalide.")
-    await db.users.update_one({"id": req.u}, {"$set": {"promo_unsubscribed": False}})
+    await db.users.update_one({"_id": ObjectId(req.u)}, {"$set": {"promo_unsubscribed": False}})
     return {"message": "Vous êtes de nouveau abonné."}
 
 
