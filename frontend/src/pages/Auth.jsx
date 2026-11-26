@@ -596,3 +596,60 @@ export function ResetPassword() {
     </AuthShell>
   );
 }
+
+
+export function Unsubscribe() {
+  const [sp] = useSearchParams();
+  const u = sp.get("u") || "";
+  const t = sp.get("t") || "";
+  const [info, setInfo] = useState(null);
+  const [error, setError] = useState("");
+  const [reasons, setReasons] = useState([]);
+  const [text, setText] = useState("");
+  const [done, setDone] = useState("");
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    api.get("/unsubscribe/info", { params: { u, t } })
+      .then((r) => { setInfo(r.data); if (r.data.unsubscribed) setDone("Vous êtes déjà désabonné des e-mails publicitaires."); })
+      .catch((e) => setError(apiErr(e)));
+  }, [u, t]);
+  const toggle = (code) => setReasons((r) => (r.includes(code) ? r.filter((c) => c !== code) : [...r, code]));
+  const submit = async () => {
+    setLoading(true); setError("");
+    try { const { data } = await api.post("/unsubscribe", { u, t, reasons, reason_text: text }); setDone(data.message); }
+    catch (e) { setError(apiErr(e)); } finally { setLoading(false); }
+  };
+  const resub = async () => {
+    setLoading(true);
+    try { await api.post("/unsubscribe/resubscribe", { u, t }); setDone(""); setInfo({ ...info, unsubscribed: false }); toast.success("Abonnement réactivé"); }
+    catch (e) { setError(apiErr(e)); } finally { setLoading(false); }
+  };
+  return (
+    <AuthShell title="Se désabonner" sub="E-mails publicitaires AfriMarket">
+      {error && <div className="text-sm text-destructive mb-3" data-testid="unsubscribe-error">{error}</div>}
+      {done ? (
+        <div className="space-y-4" data-testid="unsubscribe-done">
+          <p className="text-sm">{done}</p>
+          <Button variant="outline" className="w-full rounded-full" disabled={loading} onClick={resub}>Me réabonner</Button>
+          <Link to="/" className="block text-center text-sm text-primary hover:underline">Retour à l'accueil</Link>
+        </div>
+      ) : info && (
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">Adresse : {info.email}. Pourquoi souhaitez-vous vous désabonner ?</p>
+          <div className="space-y-2">
+            {info.reasons.map((r) => (
+              <label key={r.code} className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={reasons.includes(r.code)} onChange={() => toggle(r.code)} />{r.label}
+              </label>
+            ))}
+          </div>
+          <textarea className="w-full border border-border rounded-md p-2 text-sm bg-background" rows={3} maxLength={500}
+            placeholder="Votre motif (facultatif)" value={text} onChange={(e) => setText(e.target.value)} data-testid="unsubscribe-text" />
+          <Button className="w-full rounded-full h-11" disabled={loading} onClick={submit} data-testid="unsubscribe-submit">
+            {loading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}Confirmer le désabonnement
+          </Button>
+        </div>
+      )}
+    </AuthShell>
+  );
+}

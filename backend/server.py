@@ -139,6 +139,9 @@ class SettingsReq(BaseModel):
     homepage_images: Optional[List[str]] = None
     homepage_ads: Optional[dict] = None
     daily_offer_duration_hours: Optional[int] = None
+    promo_email_enabled: Optional[bool] = None
+    promo_email_frequency_days: Optional[int] = None
+    promo_email_max_products: Optional[int] = None
 
 
 class CustomsRuleReq(BaseModel):
@@ -5124,6 +5127,16 @@ async def admin_put_settings(req: SettingsReq, request: Request, user: dict = De
         if not 24 <= req.daily_offer_duration_hours <= 336:
             raise HTTPException(status_code=400, detail="La durée des offres doit être comprise entre 24 h et 2 semaines.")
         upd["daily_offer_duration_hours"] = req.daily_offer_duration_hours
+    if req.promo_email_enabled is not None:
+        upd["promo_email_enabled"] = bool(req.promo_email_enabled)
+    if req.promo_email_frequency_days is not None:
+        if not 1 <= req.promo_email_frequency_days <= 90:
+            raise HTTPException(status_code=400, detail="La fréquence doit être comprise entre 1 et 90 jours.")
+        upd["promo_email_frequency_days"] = req.promo_email_frequency_days
+    if req.promo_email_max_products is not None:
+        if not 1 <= req.promo_email_max_products <= 12:
+            raise HTTPException(status_code=400, detail="Le nombre de produits doit être compris entre 1 et 12.")
+        upd["promo_email_max_products"] = req.promo_email_max_products
     await db.platform_settings.update_one({"_id": "global"}, {"$set": upd}, upsert=True)
     await audit_log(user, "UPDATE_SETTINGS", "settings", "global", None, upd, _client_ip(request))
     s = await get_settings(); s.pop("_id", None)
@@ -5323,8 +5336,212 @@ app.add_middleware(
 )
 
 
+# ---------------- Promotional e-mails ----------------
+UNSUBSCRIBE_REASONS = {
+    "TOO_FREQUENT": "Je reçois trop d'e-mails",
+    "NOT_RELEVANT": "Les produits ne m'intéressent pas",
+    "NEVER_SUBSCRIBED": "Je ne me suis jamais inscrit à ces e-mails",
+    "NO_LONGER_USE": "Je n'utilise plus AfriMarket",
+    "OTHER": "Autre motif",
+}
+
+
+def _unsub_token(user_id: str) -> str:
+    import hmac
+    key = os.environ["JWT_SECRET"].encode()
+    return hmac.new(key, f"unsubscribe:{user_id}".encode(), hashlib.sha256).hexdigest()[:40]
+
+
+def _unsub_user_ok(user_id: str, token: str) -> bool:
+    return bool(user_id and token) and secrets.compare_digest(_unsub_token(user_id), token)
+
+
+def _promo_email_html(user: dict, products: list, base: str) -> str:
+    from html import escape
+    cards = []
+    for p in products:
+        img = p.get("image") or ""
+        if img.startswith("/"):
+            img = base + img
+        img_tag = (f'<img src="{escape(img)}" alt="" width="160" style="display:block;margin:0 auto 8px;'
+                   f'border-radius:8px">') if img.startswith("https://") else ""
+        price = p.get("display_price") or p.get("price") or ""
+        cards.append(
+            f'<td style="padding:8px;text-align:center;vertical-align:top;width:50%">{img_tag}'
+            f'<a href="{base}/products/{escape(p["id"])}" style="color:#171717;font-weight:bold;text-decoration:none">'
+            f'{escape(p.get("name", ""))}</a><br><span style="color:#888">{escape(str(price))}</span></td>'
+        )
+    rows = "".join("<tr>" + "".join(cards[i:i + 2]) + "</tr>" for i in range(0, len(cards), 2))
+    unsub = f"{base}/unsubscribe?u={user['id']}&t={_unsub_token(user['id'])}"
+    return (
+        '<table role="presentation" width="100%"><tr><td style="padding:24px;font-family:Arial,sans-serif;color:#171717">'
+        f'<h2 style="margin:0 0 12px">Bonjour {escape(user.get("name") or "")}, nos sélections pour vous</h2>'
+        f'<table role="presentation" width="100%">{rows}</table>'
+        f'<p style="text-align:center;margin:20px 0"><a href="{base}/products" style="background:#171717;color:#fff;'
+        f'padding:10px 20px;border-radius:20px;text-decoration:none">Voir plus de produits</a></p>'
+        '<p style="font-size:12px;color:#888;margin-top:24px">Vous recevez ce message car vous avez un compte AfriMarket. '
+        f'<a href="{unsub}" style="color:#888">Se désabonner</a></p>'
+        '</td></tr></table>'
+    )
+
+
+async def _promo_products_for(user: dict, limit: int, disabled: set) -> list:
+    country = user.get("country")
+    shop_query = {"status": "APPROVED", "suspended": {"$ne": True}}
+    if country:
+        shop_query["country"] = country
+    shops = await db.shops.find(shop_query, {"id": 1, "country": 1, "owner_id": 1}).to_list(5000)
+    shop_ids = [sh["id"] for sh in shops if sh.get("country") not in disabled and sh.get("owner_id") != user["id"]]
+    if not shop_ids:
+        return []
+    interest = set()
+    orders = await db.orders.find({"customer_id": user["id"]}, {"items": 1}).sort("created_at", -1).to_list(20)
+    ids = [it.get("product_id") for o in orders for it in (o.get("items") or []) if it.get("product_id")]
+    if ids:
+        for pr in await db.products.find({"id": {"$in": ids}}, {"category": 1}).to_list(200):
+            if pr.get("category"):
+                interest.add(pr["category"])
+    base_q = {"shop_id": {"$in": shop_ids}, "status": "ACTIVE", "moderation_status": "APPROVED", "stock": {"$gt": 0}}
+    picked = []
+    if interest:
+        picked = await db.products.find({**base_q, "category": {"$in": list(interest)}}).sort("sold", -1).to_list(limit)
+    if len(picked) < limit:
+        have = [x["id"] for x in picked]
+        more = await db.products.find({**base_q, "id": {"$nin": have}}).sort("sold", -1).to_list(limit - len(picked))
+        picked += more
+    return [_public_product(x, "SIMPLE") for x in picked]
+
+
+async def run_promo_emails() -> dict:
+    """Sent regardless of browser cookie choices; only an unsubscribe stops it."""
+    settings = await get_settings()
+    stats = {"sent": 0, "skipped": 0}
+    if not settings.get("promo_email_enabled", True):
+        return stats
+    now = datetime.now(timezone.utc)
+    lease = await db.cron_runs.find_one_and_update(
+        {"_id": "promo-emails", "$or": [{"lease_until": {"$exists": False}}, {"lease_until": {"$lte": now.isoformat()}}]},
+        {"$set": {"lease_until": (now + timedelta(minutes=30)).isoformat()}}, upsert=False)
+    if lease is None:
+        try:
+            await db.cron_runs.insert_one({"_id": "promo-emails", "lease_until": (now + timedelta(minutes=30)).isoformat()})
+        except Exception:
+            return stats
+    try:
+        base = os.environ.get("FRONTEND_URL", "").rstrip("/")
+        if not base.startswith("https://"):
+            return stats
+        freq = int(settings.get("promo_email_frequency_days") or 7)
+        limit = int(settings.get("promo_email_max_products") or 4)
+        cutoff = (now - timedelta(days=freq)).isoformat()
+        disabled = set(await payapis.disabled_countries())
+        users = await db.users.find({
+            "role": {"$in": ["CLIENT", "MERCHANT"]},
+            "status": {"$in": [None, "ACTIVE"]},
+            "suspended": {"$ne": True},
+            "promo_unsubscribed": {"$ne": True},
+            "email": {"$exists": True, "$ne": ""},
+            "$or": [{"promo_last_sent_at": {"$exists": False}}, {"promo_last_sent_at": {"$lte": cutoff}}],
+        }).to_list(300)
+        for user in users:
+            if user.get("country") in disabled:
+                stats["skipped"] += 1
+                continue
+            products = await _promo_products_for(user, limit, disabled)
+            if not products:
+                stats["skipped"] += 1
+                continue
+            ok = await send_email(to=user["email"], subject="Nos sélections pour vous sur AfriMarket",
+                                  html=_promo_email_html(user, products, base), country=user.get("country"))
+            if ok:
+                await db.users.update_one({"id": user["id"]}, {"$set": {"promo_last_sent_at": now_iso()}})
+                stats["sent"] += 1
+            else:
+                stats["skipped"] += 1
+    finally:
+        await db.cron_runs.update_one({"_id": "promo-emails"}, {"$unset": {"lease_until": ""}, "$set": {"stats": stats, "at": now_iso()}})
+    return stats
+
+
+async def _promo_loop():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await run_promo_emails()
+        except Exception:
+            logger.exception("Promo email cycle failed")
+        await asyncio.sleep(3600)
+
+
+class UnsubscribeReq(BaseModel):
+    u: str
+    t: str
+    reasons: List[str] = []
+    reason_text: Optional[str] = ""
+
+
+@api.get("/unsubscribe/info")
+async def unsubscribe_info(u: str, t: str):
+    if not _unsub_user_ok(u, t):
+        raise HTTPException(status_code=400, detail="Lien de désabonnement invalide.")
+    user = await db.users.find_one({"id": u})
+    if not user:
+        raise HTTPException(status_code=404, detail="Compte introuvable.")
+    email = user.get("email", "")
+    name, _, domain = email.partition("@")
+    return {"email": (name[:2] + "***@" + domain), "unsubscribed": bool(user.get("promo_unsubscribed")),
+            "reasons": [{"code": k, "label": v} for k, v in UNSUBSCRIBE_REASONS.items()]}
+
+
+@api.post("/unsubscribe")
+async def unsubscribe(req: UnsubscribeReq):
+    if not _unsub_user_ok(req.u, req.t):
+        raise HTTPException(status_code=400, detail="Lien de désabonnement invalide.")
+    user = await db.users.find_one({"id": req.u})
+    if not user:
+        raise HTTPException(status_code=404, detail="Compte introuvable.")
+    reasons = [r for r in req.reasons if r in UNSUBSCRIBE_REASONS]
+    await db.users.update_one({"id": req.u}, {"$set": {"promo_unsubscribed": True, "promo_unsubscribed_at": now_iso()}})
+    await db.promo_unsubscribes.insert_one({
+        "id": new_id(), "user_id": req.u, "role": user.get("role"), "country": user.get("country"),
+        "reasons": reasons, "reason_text": (req.reason_text or "")[:500], "created_at": now_iso()})
+    return {"message": "Vous êtes désabonné des e-mails publicitaires."}
+
+
+@api.post("/unsubscribe/resubscribe")
+async def resubscribe(req: UnsubscribeReq):
+    if not _unsub_user_ok(req.u, req.t):
+        raise HTTPException(status_code=400, detail="Lien de désabonnement invalide.")
+    await db.users.update_one({"id": req.u}, {"$set": {"promo_unsubscribed": False}})
+    return {"message": "Vous êtes de nouveau abonné."}
+
+
+@api.get("/admin/promo-emails/stats")
+async def promo_email_stats(user: dict = Depends(require_module("settings"))):
+    rows = await db.promo_unsubscribes.find({}).sort("created_at", -1).to_list(500)
+    counts = {}
+    for r in rows:
+        for code in r.get("reasons", []):
+            counts[code] = counts.get(code, 0) + 1
+    others = [{"text": r["reason_text"], "at": r["created_at"], "country": r.get("country")}
+              for r in rows if r.get("reason_text")][:30]
+    return {
+        "unsubscribed": await db.users.count_documents({"promo_unsubscribed": True}),
+        "subscribed": await db.users.count_documents({"role": {"$in": ["CLIENT", "MERCHANT"]}, "promo_unsubscribed": {"$ne": True}}),
+        "reasons": [{"code": k, "label": v, "count": counts.get(k, 0)} for k, v in UNSUBSCRIBE_REASONS.items()],
+        "texts": others,
+    }
+
+
+@api.post("/admin/promo-emails/run")
+async def promo_email_run(background_tasks: BackgroundTasks, user: dict = Depends(require_module("settings"))):
+    background_tasks.add_task(run_promo_emails)
+    return {"message": "Envoi lancé"}
+
+
 @app.on_event("startup")
 async def startup():
+    asyncio.create_task(_promo_loop())
     await db.users.create_index("email", unique=True)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     try:

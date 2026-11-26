@@ -1042,6 +1042,16 @@ export function AdminGlobalSettings() {
     daily_offer_duration_hours: 24,
   });
   const [durationDraft, setDurationDraft] = useState(24);
+  const [promo, setPromo] = useState({ enabled: true, freq: 7, max: 4 });
+  const [promoStats, setPromoStats] = useState(null);
+  const loadPromoStats = () => api.get("/admin/promo-emails/stats").then((r) => setPromoStats(r.data)).catch(() => {});
+  const savePromo = async (patch) => {
+    const next = { ...promo, ...patch };
+    try {
+      await api.put("/admin/settings", { promo_email_enabled: next.enabled, promo_email_frequency_days: Number(next.freq), promo_email_max_products: Number(next.max) });
+      setPromo(next); toast.success("Paramètres e-mails publicitaires enregistrés");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
 
   const loadTaxes = () => api.get("/admin/taxes").then((r) => { setTaxes(r.data.taxes); setTaxesEnabled(r.data.taxes_enabled); }).catch(() => {});
   useEffect(() => {
@@ -1051,6 +1061,8 @@ export function AdminGlobalSettings() {
       const settings = r.data.settings || {};
       setCsvImport(!!settings.csv_import_enabled);
       setKycEnabled(settings.kyc_enabled !== false);
+      setPromo({ enabled: settings.promo_email_enabled !== false, freq: settings.promo_email_frequency_days || 7, max: settings.promo_email_max_products || 4 });
+      loadPromoStats();
       const next = {
         homepage_images: settings.homepage_images || [],
         homepage_ads: { above_hero: false, below_hero: true, show_promotions: true, show_popular: false, ...(settings.homepage_ads || {}) },
@@ -1234,6 +1246,29 @@ export function AdminGlobalSettings() {
               <Button type="button" onClick={saveOfferDuration} data-testid="save-daily-offer-duration">Enregistrer</Button>
             </div>
             <p className="text-xs text-muted-foreground mt-1">Valeur par défaut : 24 h. Maximum : 2 semaines. Le changement s’applique aux prochaines activations.</p>
+          </div>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl p-5" data-testid="promo-email-settings">
+          <h3 className="font-display font-bold mb-4">E-mails publicitaires</h3>
+          <div className="space-y-4 max-w-md">
+            <label className="flex items-center justify-between gap-3 text-sm">
+              <span>Envoi automatique activé (indépendant du choix de cookies)</span>
+              <Switch checked={promo.enabled} onCheckedChange={(v) => savePromo({ enabled: v })} data-testid="promo-enabled" />
+            </label>
+            <div className="flex gap-3 items-end">
+              <div className="flex-1"><Label>Fréquence (jours)</Label><Input type="number" min="1" max="90" value={promo.freq} onChange={(e) => setPromo({ ...promo, freq: e.target.value })} data-testid="promo-frequency" /></div>
+              <div className="flex-1"><Label>Produits par e-mail</Label><Input type="number" min="1" max="12" value={promo.max} onChange={(e) => setPromo({ ...promo, max: e.target.value })} data-testid="promo-max" /></div>
+              <Button type="button" onClick={() => savePromo({})} data-testid="promo-save">Enregistrer</Button>
+            </div>
+            <Button type="button" variant="outline" onClick={async () => { try { await api.post("/admin/promo-emails/run"); toast.success("Envoi lancé"); } catch (e) { toast.error(apiErr(e)); } }}>Lancer un envoi maintenant</Button>
+            {promoStats && (
+              <div className="text-sm space-y-1" data-testid="promo-stats">
+                <div>Abonnés : <b>{promoStats.subscribed}</b> · Désabonnés : <b>{promoStats.unsubscribed}</b></div>
+                {promoStats.reasons.map((r) => <div key={r.code} className="text-muted-foreground">{r.label} : {r.count}</div>)}
+                {promoStats.texts.map((x, i) => <div key={i} className="text-muted-foreground italic">« {x.text} »</div>)}
+              </div>
+            )}
           </div>
         </div>
 

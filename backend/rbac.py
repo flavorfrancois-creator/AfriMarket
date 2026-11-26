@@ -124,6 +124,9 @@ DEFAULT_SETTINGS = {
     "two_factor_channels": ["email"],     # subset of email|sms|whatsapp
     "two_factor_delivery_disabled": False,
     "refund_threshold": 100000.0,         # amount above which double-validation applies
+    "promo_email_enabled": True,
+    "promo_email_frequency_days": 7,
+    "promo_email_max_products": 4,
     "default_commission_rate": 0.05,      # platform commission (0.05 = 5%)
     "category_commissions": {},           # {category_name: rate} overrides
     "default_product_quota": 0,           # max products per shop (0 = unlimited)
