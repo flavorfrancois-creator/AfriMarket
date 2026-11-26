@@ -652,6 +652,63 @@ async def login(req: LoginReq, request: Request):
     return {"token": token, "user": _user_public(user)}
 
 
+class GoogleLoginReq(BaseModel):
+    credential: str
+    role: str = "CLIENT"
+
+
+@api.get("/auth/google/config")
+async def google_config():
+    return {"client_id": os.environ.get("GOOGLE_CLIENT_ID", "")}
+
+
+@api.post("/auth/google")
+async def google_login(req: GoogleLoginReq, request: Request):
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="Connexion Google non configurée.")
+    try:
+        r = await asyncio.to_thread(
+            requests.get, "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": req.credential}, timeout=10)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Google est injoignable.")
+    info = r.json() if r.status_code == 200 else {}
+    if info.get("aud") != client_id or str(info.get("email_verified")).lower() != "true" or not info.get("email"):
+        raise HTTPException(status_code=401, detail="Jeton Google invalide.")
+    email = info["email"].lower().strip()
+    user = await db.users.find_one({"email": email})
+    if not user:
+        role = "MERCHANT" if req.role.upper() == "MERCHANT" else "CLIENT"
+        doc = {
+            "name": info.get("name") or email.split("@")[0],
+            "email": email,
+            "password_hash": hash_password(secrets.token_urlsafe(32)),
+            "phone": "", "role": role, "profiles": [role], "country": "",
+            "language": "fr", "currency": "", "token_version": 0,
+            "phone_verified": False, "email_verified": True,
+            "kyc_status": "NONE", "invite_code": gen_invite_code(),
+            "referred_by": None, "is_partner": False, "created_at": now_iso(),
+            "google_sub": info.get("sub"), "avatar": info.get("picture", ""),
+        }
+        if role == "MERCHANT":
+            doc["merchant_terms_accepted_at"] = now_iso()
+            doc["merchant_terms_version"] = "2026-10-26"
+        res = await db.users.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        user = doc
+    else:
+        if user.get("status") == "PENDING":
+            raise HTTPException(status_code=403, detail="Compte en attente de validation par l'administrateur.")
+        if (user.get("status") or "ACTIVE") != "ACTIVE":
+            raise HTTPException(status_code=403, detail="Compte suspendu ou désactivé. Contactez un administrateur.")
+        await db.users.update_one({"_id": user["_id"]}, {"$set": {"email_verified": True, "google_sub": info.get("sub")}})
+        user["email_verified"] = True
+    await _record_login(user, request)
+    token = create_access_token(str(user["_id"]), email, user["role"], user.get("token_version", 0))
+    return {"token": token, "user": _user_public(user)}
+
+
 @api.post("/auth/2fa/verify")
 async def verify_2fa(req: TwoFAVerifyReq, request: Request):
     ch = await db.otp_challenges.find_one({"id": req.challenge_id})

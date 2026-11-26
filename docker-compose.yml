@@ -29,6 +29,7 @@ services:
       FRONTEND_URL: ${FRONTEND_URL:-https://africashop.win}
       EMERGENT_EMAIL_KEY: ${EMERGENT_EMAIL_KEY:-}
       EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-AfriMarket}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       EMERGENT_LLM_KEY: ${EMERGENT_LLM_KEY:-}
       EMAIL_ENCRYPTION_KEY: ${EMAIL_ENCRYPTION_KEY:?Set EMAIL_ENCRYPTION_KEY in Coolify}
       FX_API_URL: ${FX_API_URL:-https://open.er-api.com/v6/latest/USD}

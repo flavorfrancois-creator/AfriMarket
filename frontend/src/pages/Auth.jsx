@@ -61,6 +61,36 @@ function redirectFor(user, from) {
   return ok ? from : "/";
 }
 
+function GoogleButton({ onToken, text = "signin_with" }) {
+  const [clientId, setClientId] = useState("");
+  const ref = React.useRef(null);
+  useEffect(() => {
+    api.get("/auth/google/config").then((r) => setClientId(r.data.client_id || "")).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!clientId || !ref.current) return undefined;
+    const init = () => {
+      if (!window.google?.accounts?.id || !ref.current) return;
+      window.google.accounts.id.initialize({ client_id: clientId, callback: (r) => onToken(r.credential) });
+      window.google.accounts.id.renderButton(ref.current, { theme: "outline", size: "large", shape: "pill", text, width: 320 });
+    };
+    if (window.google?.accounts?.id) { init(); return undefined; }
+    const sc = document.createElement("script");
+    sc.src = "https://accounts.google.com/gsi/client";
+    sc.async = true;
+    sc.onload = init;
+    document.head.appendChild(sc);
+    return undefined;
+  }, [clientId]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!clientId) return null;
+  return (
+    <div className="mt-5" data-testid="google-signin">
+      <div className="text-center text-xs text-muted-foreground mb-3">ou</div>
+      <div ref={ref} className="flex justify-center" />
+    </div>
+  );
+}
+
 export function Login() {
   const { t } = useI18n();
   const { login } = useAuth();
@@ -90,6 +120,17 @@ export function Login() {
       setError(apiErr(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const googleLogin = async (credential) => {
+    setError("");
+    try {
+      const { data } = await api.post("/auth/google", { credential });
+      login(data.token, data.user);
+      navigate(redirectFor(data.user, from), { replace: true });
+    } catch (err) {
+      setError(apiErr(err));
     }
   };
 
@@ -149,6 +190,7 @@ export function Login() {
           <Link to="/register" className="text-muted-foreground hover:text-primary">{t("register")}</Link>
         </div>
       </form>
+      <GoogleButton onToken={googleLogin} />
     </AuthShell>
   );
 }
