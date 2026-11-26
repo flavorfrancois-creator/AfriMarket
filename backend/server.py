@@ -3483,6 +3483,119 @@ async def admin_reporting(date_from: Optional[str] = None, date_to: Optional[str
     return rep
 
 
+@api.get("/admin/statistics")
+async def admin_statistics(country: Optional[str] = None, date_from: Optional[str] = None,
+                           date_to: Optional[str] = None, user: dict = Depends(require_module("reporting"))):
+    """Platform statistics; staff restricted to countries only ever see those countries."""
+    allowed = _staff_countries(user)
+    if country:
+        if allowed is not None and country not in allowed:
+            raise HTTPException(status_code=403, detail="Ce pays ne fait pas partie de votre périmètre")
+        scope = [country]
+    else:
+        scope = allowed
+    date_from, date_to = _reporting_range(date_from, date_to)
+
+    shop_q = {"country": {"$in": scope}} if scope is not None else {}
+    shops = await db.shops.find(shop_q).to_list(10000)
+    shop_country = {sh["id"]: sh.get("country") or "—" for sh in shops}
+    user_q = {"country": {"$in": scope}} if scope is not None else {}
+    users = await db.users.find(user_q, {"role": 1, "profiles": 1, "country": 1, "created_at": 1}).to_list(50000)
+    prods = await db.products.find({"shop_id": {"$in": list(shop_country)}, "status": {"$ne": "DELETED"}},
+                                   {"shop_id": 1, "status": 1, "moderation_status": 1, "stock": 1}).to_list(50000)
+    orders = await db.orders.find({"shop_id": {"$in": list(shop_country)}}).to_list(50000)
+
+    def in_range(d):
+        return bool(d) and date_from <= d[:10] <= date_to
+
+    def has(u, r):
+        return u.get("role") == r or r in (u.get("profiles") or [])
+
+    clients = [u for u in users if has(u, "CLIENT")]
+    merchants = [u for u in users if has(u, "MERCHANT")]
+    period_orders = [o for o in orders if in_range(o.get("created_at"))]
+    valid = [o for o in period_orders if o.get("status") not in ("ANNULEE", "REJETEE")]
+    active_buyers = {o.get("customer_id") for o in period_orders}
+
+    by_cur = {}
+    for o in valid:
+        c = by_cur.setdefault(o.get("currency", ""), {"currency": o.get("currency", ""), "ca": 0.0, "commission": 0.0, "orders": 0})
+        c["ca"] += float(o.get("total", 0) or 0)
+        c["commission"] += float(o.get("commission", 0) or 0)
+        c["orders"] += 1
+    for c in by_cur.values():
+        c["ca"] = round(c["ca"], 2)
+        c["commission"] = round(c["commission"], 2)
+        c["net"] = round(c["ca"] - c["commission"], 2)
+
+    status_counts = {}
+    for o in period_orders:
+        status_counts[o.get("status", "?")] = status_counts.get(o.get("status", "?"), 0) + 1
+
+    countries = {}
+
+    def row(c):
+        return countries.setdefault(c or "—", {"country": c or "—", "clients": 0, "merchants": 0, "shops": 0,
+                                                "products": 0, "orders": 0, "ca": {}})
+    for u in clients:
+        row(u.get("country"))["clients"] += 1
+    for u in merchants:
+        row(u.get("country"))["merchants"] += 1
+    for sh in shops:
+        row(sh.get("country"))["shops"] += 1
+    for pr in prods:
+        if pr.get("status") == "ACTIVE":
+            row(shop_country.get(pr.get("shop_id")))["products"] += 1
+    for o in valid:
+        r = row(shop_country.get(o.get("shop_id")))
+        r["orders"] += 1
+        r["ca"][o.get("currency", "")] = round(r["ca"].get(o.get("currency", ""), 0) + float(o.get("total", 0) or 0), 2)
+
+    monthly = {}
+    for o in valid:
+        m = (o.get("created_at") or "")[:7]
+        e = monthly.setdefault(m, {"month": m, "orders": 0})
+        e["orders"] += 1
+    shop_name = {sh["id"]: sh.get("name", "—") for sh in shops}
+    top = {}
+    for o in valid:
+        t = top.setdefault(o.get("shop_id"), {"shop": shop_name.get(o.get("shop_id"), "—"), "orders": 0, "ca": 0.0, "currency": o.get("currency", "")})
+        t["orders"] += 1
+        t["ca"] += float(o.get("total", 0) or 0)
+    for t in top.values():
+        t["ca"] = round(t["ca"], 2)
+
+    wq = {"status": {"$in": ["DEMANDE", "EN_VERIFICATION"]}}
+    owner_ids = [sh["owner_id"] for sh in shops] if scope is not None else None
+    if owner_ids is not None:
+        wq["user_id"] = {"$in": owner_ids}
+    withdrawals_pending = await db.withdrawal_requests.count_documents(wq)
+    rev_q = {"product_id": {"$in": [pr["id"] for pr in prods]}} if scope is not None and prods else ({"product_id": {"$in": []}} if scope is not None else {})
+    avg = await db.product_reviews.find(rev_q, {"rating": 1}).to_list(50000)
+
+    return {
+        "scope": scope, "allowed_countries": allowed, "date_from": date_from, "date_to": date_to,
+        "customers": {"total": len(clients), "new": sum(1 for u in clients if in_range(u.get("created_at"))),
+                      "active_buyers": len(active_buyers)},
+        "merchants": {"total": len(merchants), "new": sum(1 for u in merchants if in_range(u.get("created_at")))},
+        "shops": {"total": len(shops), "approved": sum(1 for x in shops if x.get("status") == "APPROVED"),
+                  "pending": sum(1 for x in shops if x.get("status") in ("SUBMITTED", "UNDER_REVIEW")),
+                  "suspended": sum(1 for x in shops if x.get("suspended"))},
+        "products": {"total": len(prods), "active": sum(1 for p in prods if p.get("status") == "ACTIVE"),
+                     "pending_moderation": sum(1 for p in prods if p.get("moderation_status") == "PENDING"),
+                     "approved": sum(1 for p in prods if p.get("moderation_status") == "APPROVED"),
+                     "rejected": sum(1 for p in prods if p.get("moderation_status") == "REJECTED"),
+                     "out_of_stock": sum(1 for p in prods if p.get("status") == "ACTIVE" and (p.get("stock") or 0) <= 0)},
+        "orders": {"total": len(period_orders), "valid": len(valid), "by_status": status_counts,
+                   "cancelled": sum(1 for o in period_orders if o.get("status") in ("ANNULEE", "REJETEE"))},
+        "finance": {"by_currency": sorted(by_cur.values(), key=lambda x: -x["ca"]), "withdrawals_pending": withdrawals_pending},
+        "reviews": {"count": len(avg), "average": round(sum(r.get("rating", 0) for r in avg) / len(avg), 2) if avg else None},
+        "by_country": sorted(countries.values(), key=lambda x: -x["orders"]),
+        "monthly_orders": sorted(monthly.values(), key=lambda x: x["month"]),
+        "top_shops": sorted(top.values(), key=lambda x: -x["ca"])[:10],
+    }
+
+
 @api.get("/admin/reporting/export")
 async def admin_reporting_export(date_from: Optional[str] = None, date_to: Optional[str] = None,
                                  user: dict = Depends(require_module("reporting"))):

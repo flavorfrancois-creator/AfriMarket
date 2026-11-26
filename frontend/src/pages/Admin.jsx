@@ -61,6 +61,7 @@ export function AdminLayout() {
     { to: "/admin/users", label: t("users"), icon: Users, testid: "users", show: can("users") },
     { to: "/admin/account-deletions", label: "Suppressions de comptes", icon: UserX, testid: "account-deletions", show: isAdminLevel },
     { to: "/admin/orders", label: t("orders"), icon: ShoppingCart, testid: "orders", show: can("orders") },
+    { to: "/admin/statistics", label: "Statistiques", icon: TrendingUp, testid: "statistics", show: can("reporting") },
     { to: "/admin/reporting", label: "Reporting ventes", icon: BarChart3, testid: "reporting", show: can("reporting") },
     { to: "/admin/withdrawals", label: t("withdrawals"), icon: Banknote, testid: "withdrawals", show: can("finance") },
     { to: "/admin/payouts", label: "Reversements", icon: Banknote, testid: "payouts", show: can("finance") },
@@ -147,6 +148,120 @@ const PRESETS = [
   { key: "semester", label: "Semestre" },
   { key: "year", label: "Année" },
 ];
+
+export function AdminStatistics() {
+  const { user } = useAuth();
+  const [range, setRange] = useState(presetRange("month"));
+  const [preset, setPreset] = useState("month");
+  const [country, setCountry] = useState("ALL");
+  const [calOpen, setCalOpen] = useState(false);
+  const [d, setD] = useState(null);
+  const df = range?.from ? fmtLocal(range.from) : null;
+  const dt = range?.to ? fmtLocal(range.to) : null;
+
+  useEffect(() => {
+    if (!df || !dt) return;
+    setD(null);
+    api.get("/admin/statistics", { params: { date_from: df, date_to: dt, ...(country !== "ALL" ? { country } : {}) } })
+      .then((r) => setD(r.data)).catch((e) => { toast.error(apiErr(e)); setD({}); });
+  }, [df, dt, country]);
+
+  const [allCountries, setAllCountries] = useState([]);
+  useEffect(() => { api.get("/config/countries").then((r) => setAllCountries(r.data.countries || [])).catch(() => {}); }, []);
+  const options = (d?.allowed_countries && d.allowed_countries.length ? d.allowed_countries : allCountries)
+    .map((c) => (typeof c === "string" ? c : c.name || c.code)).filter(Boolean);
+  const moneyList = (m) => Object.entries(m || {}).map(([cur, v]) => money(v, cur)).join(" · ") || "—";
+  const scopeLabel = d?.scope ? d.scope.join(", ") : "Tous les pays";
+
+  return (
+    <div data-testid="admin-statistics">
+      <PageHeader title="Statistiques" subtitle={`Périmètre : ${scopeLabel}`}
+        action={
+          <Select value={country} onValueChange={setCountry}>
+            <SelectTrigger className="w-56" data-testid="stats-country"><SelectValue placeholder="Pays" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">{user?.countries?.length ? "Tous mes pays" : "Tous les pays"}</SelectItem>
+              {options.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        } />
+      <div className="flex flex-wrap items-center gap-2 mb-6">
+        {PRESETS.map((p) => (
+          <Button key={p.key} size="sm" variant={preset === p.key ? "default" : "outline"} className="rounded-full"
+            onClick={() => { setPreset(p.key); setRange(presetRange(p.key)); }}>{p.label}</Button>
+        ))}
+        <Popover open={calOpen} onOpenChange={setCalOpen}>
+          <PopoverTrigger asChild>
+            <Button size="sm" variant={preset === "custom" ? "default" : "outline"} className="rounded-full">
+              <CalendarIcon className="w-4 h-4 mr-2" />{df && dt ? `${df} → ${dt}` : "Période personnalisée"}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="start">
+            <Calendar mode="range" selected={range} numberOfMonths={2}
+              onSelect={(r) => { setRange(r || {}); setPreset("custom"); if (r?.from && r?.to) setCalOpen(false); }} />
+          </PopoverContent>
+        </Popover>
+      </div>
+
+      {!d ? <Loading /> : !d.customers ? null : (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard label="Clients" value={d.customers.total} sub={`${d.customers.new} nouveaux · ${d.customers.active_buyers} acheteurs`} icon={Users} accent="bg-blue-100 text-blue-700" />
+            <StatCard label="Commerçants" value={d.merchants.total} sub={`${d.merchants.new} nouveaux`} icon={Store} accent="bg-purple-100 text-purple-700" />
+            <StatCard label="Boutiques" value={d.shops.approved} sub={`${d.shops.pending} en attente · ${d.shops.suspended} suspendues`} icon={Store} accent="bg-primary/10 text-primary" />
+            <StatCard label="Produits actifs" value={d.products.active} sub={`${d.products.pending_moderation} à modérer · ${d.products.out_of_stock} en rupture`} icon={Package} />
+            <StatCard label="Commandes" value={d.orders.valid} sub={`${d.orders.total} au total · ${d.orders.cancelled} annulées`} icon={ShoppingCart} />
+            <StatCard label="Retraits en attente" value={d.finance.withdrawals_pending} icon={Banknote} accent="bg-amber-100 text-amber-700" />
+            <StatCard label="Produits refusés" value={d.products.rejected} icon={XCircle} accent="bg-red-100 text-red-700" />
+            <StatCard label="Note moyenne" value={d.reviews.average ?? "—"} sub={`${d.reviews.count} avis`} icon={ShieldCheck} accent="bg-green-100 text-green-700" />
+          </div>
+
+          <div className="bg-card border border-border rounded-xl p-5">
+            <h3 className="font-display font-bold mb-3">Finance par devise (comptabilité)</h3>
+            <div className="overflow-x-auto"><table className="w-full text-sm">
+              <thead><tr className="text-left text-muted-foreground"><th className="py-2">Devise</th><th>Commandes</th><th>Chiffre d'affaires</th><th>Commission</th><th>Net marchands</th></tr></thead>
+              <tbody>{d.finance.by_currency.map((c) => (
+                <tr key={c.currency} className="border-t border-border"><td className="py-2 font-medium">{c.currency || "—"}</td><td>{c.orders}</td>
+                  <td>{money(c.ca, c.currency)}</td><td>{money(c.commission, c.currency)}</td><td>{money(c.net, c.currency)}</td></tr>
+              ))}{d.finance.by_currency.length === 0 && <tr><td colSpan={5} className="py-3 text-muted-foreground">Aucune vente sur la période</td></tr>}</tbody>
+            </table></div>
+          </div>
+
+          <div className="bg-card border border-border rounded-xl p-5">
+            <h3 className="font-display font-bold mb-3">Par pays</h3>
+            <div className="overflow-x-auto"><table className="w-full text-sm" data-testid="stats-by-country">
+              <thead><tr className="text-left text-muted-foreground"><th className="py-2">Pays</th><th>Clients</th><th>Commerçants</th><th>Boutiques</th><th>Produits</th><th>Commandes</th><th>CA</th></tr></thead>
+              <tbody>{d.by_country.map((c) => (
+                <tr key={c.country} className="border-t border-border"><td className="py-2 font-medium">{c.country}</td><td>{c.clients}</td><td>{c.merchants}</td>
+                  <td>{c.shops}</td><td>{c.products}</td><td>{c.orders}</td><td>{moneyList(c.ca)}</td></tr>
+              ))}</tbody>
+            </table></div>
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-6">
+            <div className="bg-card border border-border rounded-xl p-5">
+              <h3 className="font-display font-bold mb-3">Commandes par mois</h3>
+              <div className="h-64"><ResponsiveContainer width="100%" height="100%">
+                <BarChart data={d.monthly_orders}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="month" /><YAxis allowDecimals={false} /><Tooltip />
+                  <Bar dataKey="orders" fill="#16a34a" radius={[4, 4, 0, 0]} /></BarChart>
+              </ResponsiveContainer></div>
+            </div>
+            <div className="bg-card border border-border rounded-xl p-5">
+              <h3 className="font-display font-bold mb-3">Top boutiques</h3>
+              <table className="w-full text-sm"><tbody>{d.top_shops.map((t, i) => (
+                <tr key={i} className="border-t border-border first:border-0"><td className="py-2">{t.shop}</td><td>{t.orders} cmd</td><td className="text-right">{money(t.ca, t.currency)}</td></tr>
+              ))}</tbody></table>
+              <h3 className="font-display font-bold mt-5 mb-2">Commandes par statut</h3>
+              <div className="flex flex-wrap gap-2">{Object.entries(d.orders.by_status).map(([k, v]) => (
+                <span key={k} className="text-xs px-2 py-1 rounded-full bg-muted">{k} : {v}</span>
+              ))}</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function AdminReporting() {
   const [range, setRange] = useState(presetRange("month"));

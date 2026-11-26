@@ -24,7 +24,7 @@ import {
 import {
   AdminLayout, AdminOverview, AdminShops, AdminMyShopRequest, AdminUsers, AdminWithdrawals, AdminOrders,
   AdminAudit, AdminCountries, AdminStaff, AdminSecurity, AdminApprovals, AdminLoginJournal,
-  AdminProducts, AdminReports, AdminReviews, AdminPayouts, AdminCarriers, AdminReporting, AdminGlobalSettings, AdminEarnings,
+  AdminProducts, AdminReports, AdminReviews, AdminPayouts, AdminCarriers, AdminReporting, AdminStatistics, AdminGlobalSettings, AdminEarnings,
 } from "@/pages/Admin";
 import { AdminLogistics } from "@/components/AdminLogistics";
 import { CountryDisabledBanner } from "@/components/PayApiPicker";
@@ -120,6 +120,7 @@ function App() {
                   <Route path="users" element={<AdminUsers />} />
                   <Route path="orders" element={<AdminOrders />} />
                   <Route path="reporting" element={<AdminReporting />} />
+                  <Route path="statistics" element={<AdminStatistics />} />
                   <Route path="withdrawals" element={<AdminWithdrawals />} />
                   <Route path="payouts" element={<AdminPayouts />} />
                   <Route path="earnings" element={<AdminEarnings />} />
