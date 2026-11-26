@@ -17,6 +17,8 @@ services:
       context: ./backend
     expose:
       - "8001"
+    volumes:
+      - uploads-data:/data/uploads
     environment:
       MONGO_URL: mongodb://${SERVICE_USER_MONGO}:${SERVICE_PASSWORD_64_MONGO}@mongo:27017/?authSource=admin
       DB_NAME: test_database
@@ -58,4 +60,5 @@ services:
       start_period: 15s
 
 volumes:
+  uploads-data:
   mongo-data:

@@ -18,10 +18,33 @@ MIME_TYPES = {
 }
 
 _storage_key = None
+LOCAL_DIR = os.environ.get("LOCAL_STORAGE_DIR", "/data/uploads")
+
+
+def _local_path(path: str) -> str:
+    full = os.path.realpath(os.path.join(LOCAL_DIR, path))
+    if not full.startswith(os.path.realpath(LOCAL_DIR) + os.sep):
+        raise ValueError("invalid path")
+    return full
+
+
+def _remote_enabled() -> bool:
+    return bool(EMERGENT_KEY)
+
+
+def _put_local(path: str, data: bytes) -> dict:
+    full = _local_path(path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "wb") as fh:
+        fh.write(data)
+    return {"path": path, "size": len(data)}
 
 
 def init_storage(force: bool = False):
     global _storage_key
+    if not _remote_enabled():
+        os.makedirs(LOCAL_DIR, exist_ok=True)
+        return "local"
     if _storage_key and not force:
         return _storage_key
     resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
@@ -31,6 +54,16 @@ def init_storage(force: bool = False):
 
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
+    if not _remote_enabled():
+        return _put_local(path, data)
+    try:
+        return _put_remote(path, data, content_type)
+    except Exception as exc:
+        logger.warning("remote storage failed, using local disk: %s", exc)
+        return _put_local(path, data)
+
+
+def _put_remote(path: str, data: bytes, content_type: str) -> dict:
     key = init_storage()
     resp = requests.put(
         f"{STORAGE_URL}/objects/{path}",
@@ -49,6 +82,16 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
 
 
 def get_object(path: str):
+    try:
+        full = _local_path(path)
+        if os.path.isfile(full):
+            with open(full, "rb") as fh:
+                ext = full.rsplit(".", 1)[-1].lower()
+                return fh.read(), MIME_TYPES.get(ext, "application/octet-stream")
+    except ValueError:
+        pass
+    if not _remote_enabled():
+        raise FileNotFoundError(path)
     key = init_storage()
     resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
     if resp.status_code == 404:
@@ -60,6 +103,15 @@ def get_object(path: str):
 
 def delete_object(path: str) -> bool:
     """Best-effort removal of a stored object; returns False when the storage refuses or is unreachable."""
+    try:
+        full = _local_path(path)
+        if os.path.isfile(full):
+            os.remove(full)
+            return True
+    except (ValueError, OSError):
+        pass
+    if not _remote_enabled():
+        return True
     try:
         key = init_storage()
         resp = requests.delete(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=30)
