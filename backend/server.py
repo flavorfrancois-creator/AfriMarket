@@ -5320,22 +5320,6 @@ async def mobile_get_cart(user: dict = Depends(get_current_user)):
     return {"items": items, "count": len(items), "total": total}
 
 
-app.include_router(api)
-app.include_router(logistics.router)
-app.include_router(messaging.router)
-app.include_router(payapis.router)
-app.include_router(accounts.router)
-app.include_router(categories.router)
-app.include_router(sms_relay.router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=False,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 # ---------------- Promotional e-mails ----------------
 UNSUBSCRIBE_REASONS = {
     "TOO_FREQUENT": "Je reçois trop d'e-mails",
@@ -5530,6 +5514,7 @@ async def promo_email_stats(user: dict = Depends(require_module("settings"))):
         "subscribed": await db.users.count_documents({"role": {"$in": ["CLIENT", "MERCHANT"]}, "promo_unsubscribed": {"$ne": True}}),
         "reasons": [{"code": k, "label": v, "count": counts.get(k, 0)} for k, v in UNSUBSCRIBE_REASONS.items()],
         "texts": others,
+        "last_run": await db.cron_runs.find_one({"_id": "promo-emails"}, {"_id": 0, "stats": 1, "at": 1}),
     }
 
 
@@ -5537,6 +5522,22 @@ async def promo_email_stats(user: dict = Depends(require_module("settings"))):
 async def promo_email_run(background_tasks: BackgroundTasks, user: dict = Depends(require_module("settings"))):
     background_tasks.add_task(run_promo_emails)
     return {"message": "Envoi lancé"}
+
+
+app.include_router(api)
+app.include_router(logistics.router)
+app.include_router(messaging.router)
+app.include_router(payapis.router)
+app.include_router(accounts.router)
+app.include_router(categories.router)
+app.include_router(sms_relay.router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")

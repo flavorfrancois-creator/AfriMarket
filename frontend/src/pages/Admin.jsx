@@ -1261,9 +1261,10 @@ export function AdminGlobalSettings() {
               <div className="flex-1"><Label>Produits par e-mail</Label><Input type="number" min="1" max="12" value={promo.max} onChange={(e) => setPromo({ ...promo, max: e.target.value })} data-testid="promo-max" /></div>
               <Button type="button" onClick={() => savePromo({})} data-testid="promo-save">Enregistrer</Button>
             </div>
-            <Button type="button" variant="outline" onClick={async () => { try { await api.post("/admin/promo-emails/run"); toast.success("Envoi lancé"); } catch (e) { toast.error(apiErr(e)); } }}>Lancer un envoi maintenant</Button>
+            <Button type="button" variant="outline" onClick={async () => { try { await api.post("/admin/promo-emails/run"); toast.success("Envoi lancé, résultat dans quelques instants"); setTimeout(loadPromoStats, 8000); } catch (e) { toast.error(apiErr(e)); } }}>Lancer un envoi maintenant</Button>
             {promoStats && (
               <div className="text-sm space-y-1" data-testid="promo-stats">
+                {promoStats.last_run && <div>Dernier envoi : {promoStats.last_run.at?.slice(0, 16).replace("T", " ")} — envoyés {promoStats.last_run.stats?.sent ?? 0}, ignorés {promoStats.last_run.stats?.skipped ?? 0}</div>}
                 <div>Abonnés : <b>{promoStats.subscribed}</b> · Désabonnés : <b>{promoStats.unsubscribed}</b></div>
                 {promoStats.reasons.map((r) => <div key={r.code} className="text-muted-foreground">{r.label} : {r.count}</div>)}
                 {promoStats.texts.map((x, i) => <div key={i} className="text-muted-foreground italic">« {x.text} »</div>)}
