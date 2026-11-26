@@ -402,6 +402,15 @@ class PrivateClientReq(BaseModel):
     address: Optional[str] = ""
 
 
+class AddressReq(BaseModel):
+    label: str = ""
+    address: str
+    city: str
+    country: str = ""
+    phone: str = ""
+    is_default: bool = False
+
+
 class PaymentProviderReq(BaseModel):
     provider: str = "MONITY_WORLD"
     api_key: Optional[str] = ""
@@ -438,6 +447,8 @@ def _user_public(user: dict) -> dict:
         "status": user.get("status", "ACTIVE"),
         "shop_ids": user.get("shop_ids", []),
         "countries": user.get("countries", []),
+        "addresses": user.get("addresses", []),
+        "address_required": user.get("role") != "SUPER_ADMIN" and not any(a.get("is_default") for a in user.get("addresses", [])),
         "delegation": user.get("delegation") or {},
         "two_factor_enabled": bool(
             user.get("two_factor_enabled", False)
@@ -661,6 +672,59 @@ async def verify_2fa(req: TwoFAVerifyReq, request: Request):
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
     return {"user": _user_public(user)}
+
+
+def _addr_clean(req: AddressReq) -> dict:
+    if len(req.address.strip()) < 5 or not req.city.strip():
+        raise HTTPException(status_code=400, detail="Adresse et ville obligatoires")
+    return {"label": req.label.strip(), "address": req.address.strip(), "city": req.city.strip(),
+            "country": req.country.strip(), "phone": req.phone.strip()}
+
+
+async def _save_addresses(user: dict, addrs: list):
+    if addrs and not any(a.get("is_default") for a in addrs):
+        addrs[0]["is_default"] = True
+    await db.users.update_one({"_id": oid(user["id"])}, {"$set": {"addresses": addrs}})
+    return addrs
+
+
+@api.get("/me/addresses")
+async def list_my_addresses(user: dict = Depends(get_current_user)):
+    return {"addresses": user.get("addresses", [])}
+
+
+@api.post("/me/addresses")
+async def add_my_address(req: AddressReq, user: dict = Depends(get_current_user)):
+    addrs = list(user.get("addresses", []))
+    a = {"id": new_id(), **_addr_clean(req), "is_default": req.is_default or not addrs}
+    if a["is_default"]:
+        for x in addrs:
+            x["is_default"] = False
+    addrs.append(a)
+    return {"addresses": await _save_addresses(user, addrs)}
+
+
+@api.put("/me/addresses/{addr_id}")
+async def update_my_address(addr_id: str, req: AddressReq, user: dict = Depends(get_current_user)):
+    addrs = list(user.get("addresses", []))
+    target = next((x for x in addrs if x["id"] == addr_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Adresse introuvable")
+    target.update(_addr_clean(req))
+    if req.is_default:
+        for x in addrs:
+            x["is_default"] = x["id"] == addr_id
+    elif target.get("is_default"):
+        raise HTTPException(status_code=400, detail="Choisissez une autre adresse par défaut avant de retirer celle-ci")
+    return {"addresses": await _save_addresses(user, addrs)}
+
+
+@api.delete("/me/addresses/{addr_id}")
+async def delete_my_address(addr_id: str, user: dict = Depends(get_current_user)):
+    addrs = [x for x in user.get("addresses", []) if x["id"] != addr_id]
+    if len(addrs) == len(user.get("addresses", [])):
+        raise HTTPException(status_code=404, detail="Adresse introuvable")
+    return {"addresses": await _save_addresses(user, addrs)}
 
 
 @api.post("/auth/merchant-profile")
@@ -2806,6 +2870,11 @@ async def checkout(req: CheckoutReq, user: dict = Depends(get_current_user)):
     _deny_partner(user)
     if not req.items:
         raise HTTPException(status_code=400, detail="Panier vide")
+    default_addr = next((a for a in user.get("addresses", []) if a.get("is_default")), None)
+    if not default_addr:
+        raise HTTPException(status_code=400, detail="Ajoutez une adresse de livraison par défaut dans Mon compte avant de commander")
+    if not (req.address or "").strip():
+        req.address = f"{default_addr['address']}, {default_addr['city']}"
 
     shops_items = {}
     for it in req.items:

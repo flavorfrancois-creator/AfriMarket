@@ -243,6 +243,12 @@ export function DashboardShell({ nav, title, subtitle, headerAction }) {
         </header>
 
         <main className="flex-1 p-4 md:p-8 max-w-[1400px] w-full">
+          {user?.address_required && !partner && (
+            <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-4 py-3 text-sm" data-testid="address-required-banner">
+              Adresse obligatoire : ajoutez une adresse par défaut dans{" "}
+              <Link className="underline font-semibold" to={user.role === "MERCHANT" ? "/merchant/account" : user.role === "CLIENT" ? "/account/security" : "/admin/account"}>Mon compte</Link>.
+            </div>
+          )}
           <Outlet />
         </main>
       </div>

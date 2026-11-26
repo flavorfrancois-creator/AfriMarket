@@ -500,7 +500,15 @@ export function Checkout() {
   const navigate = useNavigate();
   const { active, client, clear: clearPrivate } = usePrivateClient();
   const { fmt: money } = useFx();
+  const { user: me } = useAuth();
+  const myAddresses = me?.addresses || [];
+  const fmtAddr = (a) => `${a.address}, ${a.city}`;
   const [address, setAddress] = useState("");
+  useEffect(() => {
+    const d = myAddresses.find((a) => a.is_default);
+    if (d) setAddress((cur) => cur || fmtAddr(d));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.addresses]);
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [useWallet, setUseWallet] = useState(false);
@@ -571,6 +579,14 @@ export function Checkout() {
         ) : (
           <div className="bg-card border border-border rounded-xl p-5">
             <Label className="mb-2 block">Adresse de livraison</Label>
+            {myAddresses.length > 0 ? (
+              <select className="w-full h-9 rounded-md border border-input bg-background px-2 text-sm mb-2" value={address}
+                onChange={(e) => setAddress(e.target.value)} data-testid="checkout-address-select">
+                {myAddresses.map((a) => <option key={a.id} value={fmtAddr(a)}>{(a.label || "Adresse")}{a.is_default ? " (par défaut)" : ""} — {fmtAddr(a)}</option>)}
+              </select>
+            ) : (
+              <p className="text-sm text-red-600 mb-2">Ajoutez d'abord une adresse par défaut dans <Link className="underline" to="/account/security">Mon compte</Link>.</p>
+            )}
             <Textarea value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Quartier, ville, repères..." data-testid="checkout-address" />
           </div>
         )}

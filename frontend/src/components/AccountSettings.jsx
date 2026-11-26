@@ -124,12 +124,64 @@ function DeletionCard() {
   );
 }
 
+function AddressesCard() {
+  const { user, refresh } = useAuth();
+  const empty = { label: "", address: "", city: "", country: user?.country || "", phone: user?.phone || "", is_default: false };
+  const [f, setF] = useState(empty);
+  const [editing, setEditing] = useState(null);
+  const list = user?.addresses || [];
+  const done = async () => { setF(empty); setEditing(null); if (refresh) await refresh(); };
+  const submit = async () => {
+    try {
+      if (editing) await api.put(`/me/addresses/${editing}`, f); else await api.post("/me/addresses", f);
+      toast.success("Adresse enregistrée"); await done();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const makeDefault = async (a) => { try { await api.put(`/me/addresses/${a.id}`, { ...a, is_default: true }); await done(); } catch (e) { toast.error(apiErr(e)); } };
+  const remove = async (a) => { try { await api.delete(`/me/addresses/${a.id}`); await done(); } catch (e) { toast.error(apiErr(e)); } };
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  return (
+    <Card icon={Mail} title="Adresses de livraison" testid="addresses-card"
+      sub="Une adresse par défaut est obligatoire. Vous pouvez en ajouter plusieurs.">
+      {list.length === 0 && <p className="text-sm text-red-600 mb-3">Aucune adresse enregistrée : ajoutez-en une.</p>}
+      <div className="space-y-2 mb-4">
+        {list.map((a) => (
+          <div key={a.id} className="flex items-start justify-between gap-2 border border-border rounded-lg p-3 text-sm">
+            <div>
+              <div className="font-medium">{a.label || "Adresse"} {a.is_default && <span className="ml-1 text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary">Par défaut</span>}</div>
+              <div className="text-muted-foreground">{a.address}, {a.city}{a.country ? `, ${a.country}` : ""}{a.phone ? ` · ${a.phone}` : ""}</div>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              {!a.is_default && <Button size="sm" variant="outline" onClick={() => makeDefault(a)}>Par défaut</Button>}
+              <Button size="sm" variant="outline" onClick={() => { setEditing(a.id); setF({ ...a }); }}>Modifier</Button>
+              {!a.is_default && <Button size="sm" variant="outline" onClick={() => remove(a)}><Trash2 className="w-4 h-4" /></Button>}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-2">
+        <Input placeholder="Nom (Maison, Bureau…)" value={f.label} onChange={set("label")} />
+        <Input placeholder="Adresse (quartier, rue, repères) *" value={f.address} onChange={set("address")} data-testid="addr-address" />
+        <Input placeholder="Ville *" value={f.city} onChange={set("city")} data-testid="addr-city" />
+        <Input placeholder="Pays" value={f.country} onChange={set("country")} />
+        <Input placeholder="Téléphone" value={f.phone} onChange={set("phone")} />
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.is_default} onChange={(e) => setF({ ...f, is_default: e.target.checked })} /> Définir par défaut</label>
+      </div>
+      <div className="flex gap-2 mt-3">
+        <Button onClick={submit} data-testid="addr-save">{editing ? "Mettre à jour" : "Ajouter l'adresse"}</Button>
+        {editing && <Button variant="outline" onClick={() => { setEditing(null); setF(empty); }}>Annuler</Button>}
+      </div>
+    </Card>
+  );
+}
+
 export function AccountSettings() {
   const { user } = useAuth();
   return (
     <div data-testid="account-settings-page">
       <PageHeader title="Mon compte" subtitle={user?.email} />
       <div className="space-y-5 max-w-3xl">
+        <AddressesCard />
         <PasswordCard />
         {user?.role === "CLIENT" && <><ContactChange kind="email" /><ContactChange kind="phone" /></>}
         <DeletionCard />
