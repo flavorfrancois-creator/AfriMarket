@@ -1223,9 +1223,9 @@ async def update_shop_storefront_images(shop_id: str, req: ShopStorefrontImagesR
         raise HTTPException(status_code=403, detail="Accès refusé")
     images = [image.strip() for image in req.images if isinstance(image, str) and image.strip()]
     if len(images) > 10 or any(
-        len(image) > 2048 or not image.startswith(("https://", "http://")) for image in images
+        len(image) > 2048 or not image.startswith(("https://", "http://", "/api/files/")) for image in images
     ):
-        raise HTTPException(status_code=400, detail="Maximum 10 images web valides")
+        raise HTTPException(status_code=400, detail="Maximum 10 images, avec des liens valides")
     settings = await get_settings()
     quota_mb = shop.get("storage_quota_mb") or settings.get("default_storage_quota_mb", 0) or 0
     if quota_mb > 0:
